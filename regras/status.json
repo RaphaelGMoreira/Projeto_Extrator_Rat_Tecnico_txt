@@ -1,0 +1,13 @@
+﻿{
+  "palavras_improdutivo": [
+    "improdutivo"
+  ],
+  "palavras_avaliacao": [
+    "pendente"
+  ],
+  "status_improdutivo": "IMPRODUTIVO",
+  "status_padrao": "RESOLVIDO",
+  "descricao_improdutivo": "IMPRODUTIVO",
+  "descricao_avaliacao": "AVALIAÇÃO",
+  "descricao_padrao": "MANUTENÇÃO"
+}

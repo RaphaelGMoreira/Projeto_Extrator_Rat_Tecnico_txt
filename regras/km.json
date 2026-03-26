@@ -1,0 +1,16 @@
+﻿{
+  "limpar_tokens_exatos": [
+    "*",
+    "o"
+  ],
+  "limpar_regex_norm": [
+    "^x{1,10}$",
+    "^a\\s*pe$"
+  ],
+  "palavra_uber": "uber",
+  "remover_asterisco": true,
+  "manter_apenas_digitos": true,
+  "incremento_km_final_ausente": 10,
+  "limpar_quando_uber": true,
+  "mascarar_repetido_mesmo_dia": true
+}

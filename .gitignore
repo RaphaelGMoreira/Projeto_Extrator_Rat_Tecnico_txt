@@ -1,0 +1,45 @@
+# Python cache / bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Test / lint / coverage caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
+# IDE / OS noise
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Local environment / secrets
+.env
+.env.*
+!.env.example
+
+# Runtime outputs and temporary files
+Planilhas geradas/
+regras/backup/
+tmp_*.txt
+tmp_*.xlsx
+*.log
+
+# Raw operational data that should not be versioned by default
+Conversa_WhatsApp_*.txt
+
+# Optional notebook cache
+.ipynb_checkpoints/

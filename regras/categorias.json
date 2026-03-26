@@ -1,0 +1,74 @@
+﻿{
+    "categoria_palavras_chave":  {
+                                     "IMPRESSORA":  [
+                                                        "impressora",
+                                                        "bobina",
+                                                        "elgin i9",
+                                                        "elgin",
+                                                        "termica",
+                                                        "impressao",
+                                                        "toner",
+                                                        "cartucho",
+                                                        "etiqueta",
+                                                        "zebra",
+                                                        "argox",
+                                                        "bematech",
+                                                        "nao imprime"
+                                                    ],
+                                     "NOBREAK":  [
+                                                     "nobreak",
+                                                     "no-break",
+                                                     "no break",
+                                                     "ups"
+                                                 ],
+                                     "NOTEBOOK":  [
+                                                      "notebook",
+                                                      "laptop",
+                                                      "tablet",
+                                                      "ultrabook",
+                                                      "macbook"
+                                                  ],
+                                     "DESKTOP":  [
+                                                     "pc",
+                                                     "desktop",
+                                                     "computador",
+                                                     "cpu",
+                                                     "pdv",
+                                                     "terminal",
+                                                     "all in one",
+                                                     "workstation",
+                                                     "totem",
+                                                     "gabinete",
+                                                     "mini pc"
+                                                 ],
+                                     "PERIFERICO":  [
+                                                        "headset",
+                                                        "fonte",
+                                                        "teclado",
+                                                        "mouse",
+                                                        "periferico",
+                                                        "monitor",
+                                                        "carregador",
+                                                        "webcam",
+                                                        "dock",
+                                                        "cabo",
+                                                        "adaptador",
+                                                        "scanner",
+                                                        "leitor",
+                                                        "mousepad",
+                                                        "bateria",
+                                                        "microfone",
+                                                        "caixa de som",
+                                                        "caixa som",
+                                                        "hdmi"
+                                                    ]
+                                 },
+    "categoria_padrao":  "PERIFERICO",
+    "categoria_ordem":  [
+                            "IMPRESSORA",
+                            "NOBREAK",
+                            "NOTEBOOK",
+                            "DESKTOP",
+                            "PERIFERICO"
+                        ]
+}

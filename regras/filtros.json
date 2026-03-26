@@ -1,0 +1,14 @@
+﻿{
+  "somente_inconsistencias_true_values": [
+    "1",
+    "true",
+    "sim",
+    "s",
+    "yes",
+    "y"
+  ],
+  "usar_contains_tecnico": true,
+  "usar_contains_status": true,
+  "usar_contains_cidade": true,
+  "ignorar_logs_dedup_com_filtro_status_cidade": true
+}

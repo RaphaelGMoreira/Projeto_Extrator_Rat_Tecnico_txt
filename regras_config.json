@@ -1,0 +1,193 @@
+﻿{
+    "tecnicos_regras":  [
+                            {
+                                "match":  "glaydson",
+                                "estado":  "CE",
+                                "cidade":  "Fortaleza",
+                                "endereco_partida":  "Av. Des. Moreira, 1300 - Aldeota, Fortaleza - CE",
+                                "tecnico_saida":  "CE_GLAYDSON_930.024.097-80"
+                            },
+                            {
+                                "match":  "edilberto",
+                                "estado":  "PA",
+                                "cidade":  "Belém",
+                                "endereco_partida":  "Av. Gov Magalhães Barata, 651 - São Brás, Belém - PA",
+                                "tecnico_saida":  "PA_EDILBERTO_6067225"
+                            },
+                            {
+                                "match":  "acacio",
+                                "estado":  "RJ",
+                                "cidade":  "Rio de Janeiro",
+                                "endereco_partida":  "CEO Corporate Executive Office - Barra da Tijuca, Rio de Janeiro - RJ",
+                                "tecnico_saida":  "RJ_ACACIO_27.962.560-2"
+                            },
+                            {
+                                "match":  "robson santos",
+                                "estado":  "SP",
+                                "cidade":  "São Paulo",
+                                "endereco_partida":  "Av. Marquês de S. Vicente, 576 - Várzea da Barra Funda",
+                                "tecnico_saida":  "SP_CR_ROBSON SANTOS_22.194.425"
+                            },
+                            {
+                                "match":  "robson paulo",
+                                "estado":  "SP",
+                                "cidade":  "São Paulo",
+                                "endereco_partida":  "Av. Marquês de S. Vicente, 576 - Várzea da Barra Funda",
+                                "tecnico_saida":  "SP_CR_ROBSON SANTOS_22.194.425"
+                            },
+                            {
+                                "match":  "breno",
+                                "estado":  "SP",
+                                "cidade":  "São Paulo",
+                                "endereco_partida":  "Av. Marquês de S. Vicente, 576 - Várzea da Barra Funda",
+                                "tecnico_saida":  "SP_CR_BRENO LUCINDO_58.637.346-9"
+                            },
+                            {
+                                "match":  "joao vitor",
+                                "estado":  "SP",
+                                "cidade":  "São Paulo",
+                                "endereco_partida":  "Av. Marquês de S. Vicente, 576 - Várzea da Barra Funda",
+                                "tecnico_saida":  "SP_MT_JOAO VITOR_37241087-X"
+                            },
+                            {
+                                "match":  "alan",
+                                "estado":  "SP",
+                                "cidade":  "São Paulo",
+                                "endereco_partida":  "Av. Marquês de S. Vicente, 576 - Várzea da Barra Funda",
+                                "tecnico_saida":  "SP_MT_ALAN GOMES_391643003"
+                            },
+                            {
+                                "match":  "gabriel",
+                                "estado":  "SP",
+                                "cidade":  "São Paulo",
+                                "endereco_partida":  "Av. Marquês de S. Vicente, 576 - Várzea da Barra Funda",
+                                "tecnico_saida":  "SP_MT_GABRIEL DE SOUZA GUAROS_589409840"
+                            },
+                            {
+                                "match":  "cristian",
+                                "estado":  "SP",
+                                "cidade":  "São Paulo",
+                                "endereco_partida":  "Av. Marquês de S. Vicente, 576 - Várzea da Barra Funda",
+                                "tecnico_saida":  "SP_MT_CRISTIAN ALEXANDRE_590916269"
+                            },
+                            {
+                                "match":  "marcelo",
+                                "estado":  "SP",
+                                "cidade":  "São Paulo",
+                                "endereco_partida":  "Av. Marquês de S. Vicente, 576 - Várzea da Barra Funda",
+                                "tecnico_saida":  "SP_CR_MARCELO HIDEO ISERI_32.398.982-2"
+                            },
+                            {
+                                "match":  "mario",
+                                "estado":  "SP",
+                                "cidade":  "São Paulo",
+                                "endereco_partida":  "Av. Marquês de S. Vicente, 576 - Várzea da Barra Funda",
+                                "tecnico_saida":  ""
+                            },
+                            {
+                                "match":  "izak",
+                                "estado":  "SP",
+                                "cidade":  "São Paulo",
+                                "endereco_partida":  "Av. Marquês de S. Vicente, 576 - Várzea da Barra Funda",
+                                "tecnico_saida":  "IMP_IZAK DANTAS_50.454.079-8",
+                                "categoria_fixa":  "IMPRESSORA LASER"
+                            },
+                            {
+                                "match":  "joao augusto",
+                                "estado":  "SP",
+                                "cidade":  "São Paulo",
+                                "endereco_partida":  "Av. Marquês de S. Vicente, 576 - Várzea da Barra Funda",
+                                "tecnico_saida":  "IMP_JOAO AUGUSTO_406.370.468-89",
+                                "categoria_fixa":  "IMPRESSORA LASER"
+                            },
+                            {
+                                "match":  "robson marques",
+                                "estado":  "SP",
+                                "cidade":  "São Paulo",
+                                "endereco_partida":  "Av. Marquês de S. Vicente, 576 - Várzea da Barra Funda",
+                                "tecnico_saida":  "IMP_ROBSON_40.266.824-8",
+                                "categoria_fixa":  "IMPRESSORA LASER"
+                            },
+                            {
+                                "match":  "gustavo",
+                                "estado":  "SP",
+                                "cidade":  "São Paulo",
+                                "endereco_partida":  "Av. Marquês de S. Vicente, 576 - Várzea da Barra Funda",
+                                "tecnico_saida":  "IMP_GUSTAVO_37.086.622-8",
+                                "categoria_fixa":  "IMPRESSORA LASER"
+                            }
+                        ],
+    "categoria_ordem":  [
+                            "IMPRESSORA",
+                            "NOBREAK",
+                            "NOTEBOOK",
+                            "DESKTOP",
+                            "PERIFERICO"
+                        ],
+    "categoria_palavras_chave":  {
+                                     "IMPRESSORA":  [
+                                                        "impressora",
+                                                        "bobina",
+                                                        "elgin i9",
+                                                        "elgin",
+                                                        "termica",
+                                                        "impressao",
+                                                        "toner",
+                                                        "cartucho",
+                                                        "etiqueta",
+                                                        "zebra",
+                                                        "argox",
+                                                        "bematech",
+                                                        "nao imprime"
+                                                    ],
+                                     "NOBREAK":  [
+                                                     "nobreak",
+                                                     "no-break",
+                                                     "no break",
+                                                     "ups"
+                                                 ],
+                                     "NOTEBOOK":  [
+                                                      "notebook",
+                                                      "laptop",
+                                                      "tablet",
+                                                      "ultrabook",
+                                                      "macbook"
+                                                  ],
+                                     "DESKTOP":  [
+                                                     "pc",
+                                                     "desktop",
+                                                     "computador",
+                                                     "cpu",
+                                                     "pdv",
+                                                     "terminal",
+                                                     "all in one",
+                                                     "workstation",
+                                                     "totem",
+                                                     "gabinete",
+                                                     "mini pc"
+                                                 ],
+                                     "PERIFERICO":  [
+                                                        "headset",
+                                                        "fonte",
+                                                        "teclado",
+                                                        "mouse",
+                                                        "periferico",
+                                                        "monitor",
+                                                        "carregador",
+                                                        "webcam",
+                                                        "dock",
+                                                        "cabo",
+                                                        "adaptador",
+                                                        "scanner",
+                                                        "leitor",
+                                                        "mousepad",
+                                                        "bateria",
+                                                        "microfone",
+                                                        "caixa de som",
+                                                        "caixa som",
+                                                        "hdmi"
+                                                    ]
+                                 },
+    "categoria_padrao":  "PERIFERICO"
+}
+

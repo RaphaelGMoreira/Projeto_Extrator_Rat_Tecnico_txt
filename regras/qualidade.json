@@ -1,0 +1,13 @@
+﻿{
+  "nome_regra_log": "VALIDACAO QUALIDADE",
+  "prefixo_inconsistente": "INCONSISTENTE:",
+  "validar_data": true,
+  "validar_chamado": true,
+  "regex_chamado": "^\\d{1,20}$",
+  "validar_tecnico_vazio": true,
+  "validar_tecnico_mapeado": true,
+  "motivo_data_invalida": "DATA INVALIDA",
+  "motivo_chamado_invalido": "CHAMADO VAZIO OU INVALIDO",
+  "motivo_tecnico_vazio": "TECNICO VAZIO",
+  "motivo_tecnico_nao_mapeado": "TECNICO NAO MAPEADO"
+}
