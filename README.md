@@ -55,8 +55,19 @@ Transformar textos operacionais (incluindo formatos heterogeneos, como exportaco
 |       |-- ci.yml
 |       `-- codeql.yml
 |-- docs/
+|   |-- project/
+|   |   |-- README.md
+|   |   |-- roadmap_impl_validacao_km_retorno.md
+|   |   |-- pr_texto_validacao_km_retorno.md
+|   |   `-- jira_card_*.md
+|   |-- governance/
+|   |   `-- git_lfs_guideline.md
 |   `-- security/
 |       `-- github_security_setup.md
+|-- examples/
+|   |-- README.md
+|   `-- input/
+|       `-- sample_teste_km.txt
 |-- requirements.txt
 |-- requirements-dev.txt
 |-- SECURITY.md
@@ -137,9 +148,13 @@ Detalhes completos em [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 Exemplos reais de plano tecnico e validacoes estao documentados nestes arquivos:
 
-- `roadmap_impl_validacao_km_retorno.md`
-- `jira_card_00_story_principal_validacao_km_retorno.md`
-- `pr_texto_validacao_km_retorno.md`
+- `docs/project/roadmap_impl_validacao_km_retorno.md`
+- `docs/project/jira_card_00_story_principal_validacao_km_retorno.md`
+- `docs/project/pr_texto_validacao_km_retorno.md`
+
+Exemplo de entrada para teste local:
+
+- `examples/input/sample_teste_km.txt`
 
 ## Seguranca
 
