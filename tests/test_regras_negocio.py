@@ -105,10 +105,15 @@ def test_regras_sequenciais_km_e_endereco(tmp_path):
     arq.write_text(conteudo, encoding="utf-8")
 
     linhas = montar_linhas(str(arq))
-    assert len(linhas) == 2
+    linhas_chamado = [l for l in linhas if l.get("CHAMADO")]
+    assert len(linhas_chamado) == 2
+    assert any(
+        (not l.get("CHAMADO")) and l.get("ATIVIDADE REALIZADA") == "RETORNO"
+        for l in linhas
+    )
 
-    primeira = linhas[0]
-    segunda = linhas[1]
+    primeira = linhas_chamado[0]
+    segunda = linhas_chamado[1]
 
     assert primeira["KM FINAL"] == "110"
     assert segunda["KM INICIAL"] == ""
