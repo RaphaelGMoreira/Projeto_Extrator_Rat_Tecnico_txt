@@ -1,7 +1,9 @@
-import textwrap
+﻿import textwrap
 
+import extrator
 from extrator import (
     atividade_realizada_semantica_valida,
+    aplicar_validacoes_km_avancadas,
     base_tecnico,
     categoria,
     converter_data,
@@ -9,6 +11,7 @@ from extrator import (
     detectar_tecnico,
     inferir_quem_acompanhou,
     montar_linhas,
+    montar_endereco_consulta_rota,
     norm,
     normalizar_hora,
     normalizar_campo_km,
@@ -28,7 +31,7 @@ def test_converter_data_varios_formatos():
 def test_normalizar_campo_km_regras_especiais():
     assert normalizar_campo_km("*") == ""
     assert normalizar_campo_km("* 6216") == "6216"
-    assert normalizar_campo_km("* A PÉ") == ""
+    assert normalizar_campo_km("* A PÃ‰") == ""
     assert normalizar_campo_km("0.1") == "01"
     assert normalizar_campo_km("A PE") == ""
     assert normalizar_campo_km("O") == ""
@@ -132,7 +135,7 @@ def test_validacao_qualidade_e_filtro_inconsistencias():
         "_LOGS": [],
         "_TEM_INCONSISTENCIA": False,
         "STATUS": "RESOLVIDO",
-        "CIDADE": "SÃO PAULO",
+        "CIDADE": "SÃƒO PAULO",
     }
     validar_qualidade_registro(linha)
 
@@ -189,14 +192,14 @@ def test_fallback_quem_acompanhou_nome_explicito():
 
 def test_parse_termino_com_rotulo_asterisco():
     bloco = [
-        "*TÉCNICO:* ALAN",
+        "*TÃ‰CNICO:* ALAN",
         "*DATA:* 10/02/2026",
         "*CLIENTE:* CLIENTE Y",
         "*CHAMADO:* 123456",
-        "*INÍCIO DA ATIVIDADE* 11:30",
-        "*TÉRMINO DA ATIVIDADE* 12:45",
+        "*INÃCIO DA ATIVIDADE* 11:30",
+        "*TÃ‰RMINO DA ATIVIDADE* 12:45",
         "*ATIVIDADE REALIZADA:* TESTE",
-        "*STATUS DO CHAMADO:* CONCLUÍDO",
+        "*STATUS DO CHAMADO:* CONCLUÃDO",
     ]
     d = parse_rat(bloco)
     assert d["INICIO DA ATIVIDADE"] == "11:30"
@@ -224,7 +227,7 @@ def test_info_retorno_prioriza_maior_km_final():
 
 def test_atividade_semantica_valida():
     assert atividade_realizada_semantica_valida("REALIZADO TESTES E AJUSTES NO EQUIPAMENTO")
-    assert not atividade_realizada_semantica_valida("*NÚMERO DE PATRIMÔNIO/SERIAL:* 264671")
+    assert not atividade_realizada_semantica_valida("*NÃšMERO DE PATRIMÃ”NIO/SERIAL:* 264671")
 
 
 def test_parse_nao_confunde_patrimonio_com_atividade():
@@ -269,8 +272,117 @@ def test_remove_rotulo_duplicado_no_inicio_da_atividade():
         "DATA: 05/03/2026",
         "CLIENTE: USCS",
         "CHAMADO: 529198",
-        "ATIVIDADE REALIZADA: ATIVIDADE REALIZADA: FORMATAÇÃO CONCLUÍDA",
-        "STATUS DO CHAMADO: CONCLUÍDO",
+        "ATIVIDADE REALIZADA: ATIVIDADE REALIZADA: FORMATAÃ‡ÃƒO CONCLUÃDA",
+        "STATUS DO CHAMADO: CONCLUÃDO",
     ]
     d = parse_rat(bloco)
-    assert d["ATIVIDADE REALIZADA"] == "FORMATAÇÃO CONCLUÍDA"
+    assert d["ATIVIDADE REALIZADA"] == "FORMATAÃ‡ÃƒO CONCLUÃDA"
+
+def test_autoajuste_outlier_por_rota(monkeypatch):
+    monkeypatch.setattr(extrator, "consultar_km_rota", lambda origem, destino: 20)
+
+    registros = [
+        {
+            "DATA": "02/03/2026",
+            "TÉCNICO": "SP_CR_ROBSON SANTOS_22.194.425",
+            "CHAMADO": "111111",
+            "KM INICIAL": "1000",
+            "KM FINAL": "1010",
+            "ENDEREÇO DE PARTIDA": "RUA A, 1",
+            "ENDEREÇO CLIENTE": "RUA B, 2",
+            "_TIPO_REGISTRO": "",
+            "_RETORNO_KM_FINAL_BASE": "1010",
+            "_RETORNO_ORDEM_IDX": 0,
+            "_LOGS": [],
+            "_TEM_INCONSISTENCIA": False,
+        },
+        {
+            "DATA": "02/03/2026",
+            "TÉCNICO": "SP_CR_ROBSON SANTOS_22.194.425",
+            "CHAMADO": "222222",
+            "KM INICIAL": "1010",
+            "KM FINAL": "1020",
+            "ENDEREÇO DE PARTIDA": "RUA B, 2",
+            "ENDEREÇO CLIENTE": "RUA C, 3",
+            "_TIPO_REGISTRO": "",
+            "_RETORNO_KM_FINAL_BASE": "1020",
+            "_RETORNO_ORDEM_IDX": 1,
+            "_LOGS": [],
+            "_TEM_INCONSISTENCIA": False,
+        },
+        {
+            "DATA": "02/03/2026",
+            "TÉCNICO": "SP_CR_ROBSON SANTOS_22.194.425",
+            "CHAMADO": "333333",
+            "KM INICIAL": "1020",
+            "KM FINAL": "1100",
+            "ENDEREÇO DE PARTIDA": "RUA C, 3",
+            "ENDEREÇO CLIENTE": "RUA D, 4",
+            "_TIPO_REGISTRO": "",
+            "_RETORNO_KM_FINAL_BASE": "1100",
+            "_RETORNO_ORDEM_IDX": 2,
+            "_LOGS": [],
+            "_TEM_INCONSISTENCIA": False,
+        },
+    ]
+
+    aplicar_validacoes_km_avancadas(registros)
+    outlier = registros[2]
+    assert outlier["KM FINAL"] == "1040"
+    assert outlier["KM PERCORRIDO"] == "20"
+    assert "AUTOAJUSTADO_POR_ROTA_OUTLIER" in outlier.get("MOTIVO VALIDAÇÃO KM", "")
+
+
+def test_revisao_completa_km_dia_maior_150_autoajusta(monkeypatch):
+    monkeypatch.setattr(extrator, "consultar_km_rota", lambda origem, destino: 30)
+
+    registros = [
+        {
+            "DATA": "03/03/2026",
+            "TÉCNICO": "SP_CR_BRENO LUCINDO_58.637.346-9",
+            "CHAMADO": "333333",
+            "KM INICIAL": "1000",
+            "KM FINAL": "1200",
+            "ENDEREÇO DE PARTIDA": "RUA D, 4",
+            "ENDEREÇO CLIENTE": "RUA E, 5",
+            "_TIPO_REGISTRO": "",
+            "_RETORNO_KM_FINAL_BASE": "1200",
+            "_RETORNO_ORDEM_IDX": 0,
+            "_LOGS": [],
+            "_TEM_INCONSISTENCIA": False,
+        },
+        {
+            "DATA": "03/03/2026",
+            "TÉCNICO": "SP_CR_BRENO LUCINDO_58.637.346-9",
+            "CHAMADO": "444444",
+            "KM INICIAL": "1200",
+            "KM FINAL": "1400",
+            "ENDEREÇO DE PARTIDA": "RUA E, 5",
+            "ENDEREÇO CLIENTE": "RUA F, 6",
+            "_TIPO_REGISTRO": "",
+            "_RETORNO_KM_FINAL_BASE": "1400",
+            "_RETORNO_ORDEM_IDX": 1,
+            "_LOGS": [],
+            "_TEM_INCONSISTENCIA": False,
+        },
+    ]
+
+    aplicar_validacoes_km_avancadas(registros)
+    assert registros[0]["KM FINAL"] == "1030"
+    assert registros[0]["KM PERCORRIDO"] == "30"
+    assert "AUTOAJUSTADO_REVISAO_COMPLETA_150KM" in registros[0].get("MOTIVO VALIDAÇÃO KM", "")
+    assert registros[1]["KM FINAL"] == "1230"
+    assert registros[1]["KM PERCORRIDO"] == "30"
+
+
+def test_endereco_com_cidade_sem_uf_complementa_sp():
+    meta = montar_endereco_consulta_rota(
+        "AV AIRTON SENNA DA SILVA 1421. MAUA",
+        cliente="UNIAO QUIMICA SANTO AMARO",
+        cidade_tecnico="SÃO PAULO",
+        estado_tecnico="SP",
+        usar_hint_cliente=True,
+    )
+    assert "MAUA - SP" in meta["consulta"]
+    assert meta["origem_inferencia"] in {"ENDERECO_MUNICIPIO", "ENDERECO_ALIAS", "ENDERECO_COMPLEMENTADO_UF"}
+
