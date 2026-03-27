@@ -12,5 +12,8 @@
   "manter_apenas_digitos": true,
   "incremento_km_final_ausente": 10,
   "limpar_quando_uber": true,
-  "mascarar_repetido_mesmo_dia": true
+  "mascarar_repetido_mesmo_dia": true,
+  "rota_timeout_segundos": 5,
+  "rota_tentativas_http": 3,
+  "rota_backoff_segundos": 0.4
 }
