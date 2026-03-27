@@ -13,11 +13,14 @@ import json
 import math
 import os
 import re
+import time
 import unicodedata
 from datetime import datetime
+from statistics import median
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 
@@ -35,6 +38,14 @@ CAMPOS = [
     "DESCRIÇÃO DO CHAMADO",
     "KM INICIAL",
     "KM FINAL",
+    "KM PERCORRIDO",
+    "KM DIA",
+    "KM ROTA REFERÊNCIA",
+    "TOLERÂNCIA ROTA KM",
+    "STATUS VALIDAÇÃO KM",
+    "MOTIVO VALIDAÇÃO KM",
+    "AJUSTE SUGERIDO KM INICIAL",
+    "AJUSTE SUGERIDO KM FINAL",
     "INICIO DA ATIVIDADE",
     "TÉRMINO DA ATIVIDADE",
     "ENDEREÇO DE PARTIDA",
@@ -53,13 +64,70 @@ RETORNO_STATUS_FIXO = "RESOLVIDO"
 RETORNO_QUEM_ACOMPANHOU_FIXO = "FERNADO"
 EXPEDIENTE_INICIO_PADRAO = "08:00"
 EXPEDIENTE_FIM_PADRAO = "18:00"
+TIMEZONE_PADRAO = "America/Sao_Paulo"
+AUDITORIA_AJUSTES_PATH = os.path.join(os.path.dirname(__file__), "auditoria_ajustes.jsonl")
+PERSISTENCIA_DIR = os.path.join(os.path.dirname(__file__), "persistencia")
+HISTORICO_RATS_PATH = os.path.join(PERSISTENCIA_DIR, "rats_historico.jsonl")
+HISTORICO_VALIDACOES_KM_PATH = os.path.join(PERSISTENCIA_DIR, "validacoes_km.jsonl")
 ROTA_TIMEOUT_SEGUNDOS = 2
+ROTA_TENTATIVAS_HTTP = 1
+ROTA_BACKOFF_SEGUNDOS = 0.0
 ROTA_MAX_TENTATIVAS = 2000
 
 _CACHE_GEO = {}
 _CACHE_ROTA = {}
 _ROTA_TENTATIVAS = 0
 _SERVICO_ROTA_INDISPONIVEL = False
+
+MUNICIPIOS_HINT_CLIENTE = [
+    "sao paulo",
+    "osasco",
+    "barueri",
+    "guarulhos",
+    "taboao da serra",
+    "sao caetano",
+    "sao caetano do sul",
+    "sao bernardo",
+    "sao bernardo do campo",
+    "santo andre",
+    "diadema",
+    "maua",
+    "carapicuiba",
+    "jandira",
+    "itapevi",
+    "cotia",
+    "embu",
+    "embu das artes",
+    "santana de parnaiba",
+    "cajamar",
+    "mogi das cruzes",
+    "ribeirao pires",
+]
+
+BAIRROS_SP_HINT_CLIENTE = [
+    "butanta",
+    "tatuape",
+    "santo amaro",
+    "pedreira",
+    "vila maria",
+    "tucuruvi",
+    "vila medeiros",
+    "vila guilherme",
+    "peri peri",
+    "parelheiros",
+    "santana",
+    "pinheiros",
+    "lapa",
+    "itaquera",
+    "mooca",
+    "ipiranga",
+    "barra funda",
+]
+
+ALIAS_LOCALIDADE_CLIENTE = {
+    "sbc": "sao bernardo do campo",
+    "scs": "sao caetano do sul",
+}
 
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "regras_config.json")
 CONFIG_DIR_PATH = os.path.join(os.path.dirname(__file__), "regras")
@@ -268,6 +336,9 @@ DEFAULT_CONFIG = {
         "incremento_km_final_ausente": 10,
         "limpar_quando_uber": True,
         "mascarar_repetido_mesmo_dia": True,
+        "rota_timeout_segundos": 5,
+        "rota_tentativas_http": 3,
+        "rota_backoff_segundos": 0.4,
     },
     "endereco_regras": {
         "mascara_valor": "-",
@@ -345,6 +416,13 @@ CAMPOS_EXPORTACAO = [
     "KM INICIAL",
     "KM FINAL",
     "KM PERCORRIDO",
+    "KM DIA",
+    "KM ROTA REFERÊNCIA",
+    "TOLERÂNCIA ROTA KM",
+    "STATUS VALIDAÇÃO KM",
+    "MOTIVO VALIDAÇÃO KM",
+    "AJUSTE SUGERIDO KM INICIAL",
+    "AJUSTE SUGERIDO KM FINAL",
     "INICIO DA ATIVIDADE",
     "TÉRMINO DA ATIVIDADE",
     "ENDEREÇO DE PARTIDA",
@@ -380,6 +458,13 @@ MAPA_CAMPOS_EXPORTACAO = {
     "KM INICIAL": "KM INICIAL",
     "KM FINAL": "KM FINAL",
     "KM PERCORRIDO": "KM PERCORRIDO",
+    "KM DIA": "KM DIA",
+    "KM ROTA REFERÊNCIA": "KM ROTA REFERÊNCIA",
+    "TOLERÂNCIA ROTA KM": "TOLERÂNCIA ROTA KM",
+    "STATUS VALIDAÇÃO KM": "STATUS VALIDAÇÃO KM",
+    "MOTIVO VALIDAÇÃO KM": "MOTIVO VALIDAÇÃO KM",
+    "AJUSTE SUGERIDO KM INICIAL": "AJUSTE SUGERIDO KM INICIAL",
+    "AJUSTE SUGERIDO KM FINAL": "AJUSTE SUGERIDO KM FINAL",
     "INICIO DA ATIVIDADE": "INICIO DA ATIVIDADE",
     "TÉRMINO DA ATIVIDADE": "TÉRMINO DA ATIVIDADE",
     "ENDEREÇO DE PARTIDA": "ENDEREÇO DE PARTIDA",
@@ -756,6 +841,39 @@ def _normalizar_km_regras(cfg):
     if incremento < 0:
         incremento = 0
     base["incremento_km_final_ausente"] = incremento
+
+    rota_timeout = base.get("rota_timeout_segundos", 5)
+    try:
+        rota_timeout = float(rota_timeout)
+    except (TypeError, ValueError):
+        rota_timeout = 5.0
+    if rota_timeout < 1:
+        rota_timeout = 1.0
+    if rota_timeout > 30:
+        rota_timeout = 30.0
+    base["rota_timeout_segundos"] = rota_timeout
+
+    rota_tentativas_http = base.get("rota_tentativas_http", 3)
+    try:
+        rota_tentativas_http = int(rota_tentativas_http)
+    except (TypeError, ValueError):
+        rota_tentativas_http = 3
+    if rota_tentativas_http < 1:
+        rota_tentativas_http = 1
+    if rota_tentativas_http > 6:
+        rota_tentativas_http = 6
+    base["rota_tentativas_http"] = rota_tentativas_http
+
+    rota_backoff = base.get("rota_backoff_segundos", 0.4)
+    try:
+        rota_backoff = float(rota_backoff)
+    except (TypeError, ValueError):
+        rota_backoff = 0.4
+    if rota_backoff < 0:
+        rota_backoff = 0.0
+    if rota_backoff > 3:
+        rota_backoff = 3.0
+    base["rota_backoff_segundos"] = rota_backoff
     return base
 
 
@@ -1023,6 +1141,9 @@ def _atualizar_cache_regras(cfg):
     global ENDERECO_REGRAS
     global QUALIDADE_REGRAS
     global FILTROS_REGRAS
+    global ROTA_TIMEOUT_SEGUNDOS
+    global ROTA_TENTATIVAS_HTTP
+    global ROTA_BACKOFF_SEGUNDOS
 
     CONFIG_REGRAS = cfg
     TECNICOS_REGRAS_PADRAO = _normalizar_tecnicos_regras(CONFIG_REGRAS.get("tecnicos_regras", []))
@@ -1034,6 +1155,9 @@ def _atualizar_cache_regras(cfg):
     ENDERECO_REGRAS = _normalizar_endereco_regras(CONFIG_REGRAS.get("endereco_regras", {}))
     QUALIDADE_REGRAS = _normalizar_qualidade_regras(CONFIG_REGRAS.get("qualidade_regras", {}))
     FILTROS_REGRAS = _normalizar_filtros_regras(CONFIG_REGRAS.get("filtros_regras", {}))
+    ROTA_TIMEOUT_SEGUNDOS = float(KM_REGRAS.get("rota_timeout_segundos", 5))
+    ROTA_TENTATIVAS_HTTP = int(KM_REGRAS.get("rota_tentativas_http", 3))
+    ROTA_BACKOFF_SEGUNDOS = float(KM_REGRAS.get("rota_backoff_segundos", 0.4))
 
     if not CATEGORIA_ORDEM:
         CATEGORIA_ORDEM = ["IMPRESSORA", "NOBREAK", "NOTEBOOK", "DESKTOP", "PERIFERICO"]
@@ -1344,7 +1468,8 @@ def calcular_termino_retorno(termino_ultimo_chamado, horario_fim_expediente):
     return minutos_para_hora_hhmm(termino_min + 1)
 
 
-def _http_get_json(url):
+def _http_get_json(url, timeout_segundos=None):
+    timeout = ROTA_TIMEOUT_SEGUNDOS if timeout_segundos is None else timeout_segundos
     req = Request(
         url,
         headers={
@@ -1352,8 +1477,43 @@ def _http_get_json(url):
             "Accept": "application/json",
         },
     )
-    with urlopen(req, timeout=ROTA_TIMEOUT_SEGUNDOS) as resp:
+    with urlopen(req, timeout=timeout) as resp:
         return json.loads(resp.read().decode("utf-8"))
+
+
+def _formatar_erro_http(exc):
+    if isinstance(exc, HTTPError):
+        return f"HTTPError({exc.code})"
+    if isinstance(exc, URLError):
+        return f"URLError({limpar(getattr(exc, 'reason', '')) or 'SEM_RAZAO'})"
+    nome = type(exc).__name__
+    msg = limpar(str(exc))
+    return f"{nome}({msg})" if msg else nome
+
+
+def _http_get_json_com_retry(url):
+    global _ROTA_TENTATIVAS
+
+    erros = []
+    tentativas = max(1, int(ROTA_TENTATIVAS_HTTP))
+    for tentativa in range(1, tentativas + 1):
+        if _ROTA_TENTATIVAS >= ROTA_MAX_TENTATIVAS:
+            erros.append("LIMITE_GLOBAL_TENTATIVAS")
+            break
+
+        try:
+            _ROTA_TENTATIVAS += 1
+            dados = _http_get_json(url, timeout_segundos=ROTA_TIMEOUT_SEGUNDOS)
+            return dados, erros
+        except (HTTPError, URLError, TimeoutError, ValueError, KeyError, json.JSONDecodeError, OSError) as exc:
+            erros.append(f"T{tentativa}:{_formatar_erro_http(exc)}")
+        except Exception as exc:
+            erros.append(f"T{tentativa}:{_formatar_erro_http(exc)}")
+
+        if tentativa < tentativas and ROTA_BACKOFF_SEGUNDOS > 0:
+            time.sleep(ROTA_BACKOFF_SEGUNDOS * tentativa)
+
+    return None, erros
 
 
 def _extrair_coord_nominatim(dados):
@@ -1390,6 +1550,236 @@ def normalizar_endereco_para_rota(endereco):
     return txt.strip()
 
 
+def endereco_tem_localidade_explicita(endereco):
+    txt = limpar(endereco)
+    if not txt or txt == "-":
+        return False
+    n = norm(txt)
+
+    # CEP já ajuda muito a ancorar a geocodificação.
+    if re.search(r"\b\d{5}-?\d{3}\b", txt):
+        return True
+
+    # Padrões comuns com UF.
+    if re.search(r"(?:,\s*|-?\s*)(sp|rj|pa|ce)\b", n):
+        return True
+
+    # Cidades conhecidas do escopo do projeto.
+    cidades_referencia = set(MUNICIPIOS_HINT_CLIENTE + ["rio de janeiro", "fortaleza", "belem", "belém"])
+    for cidade in cidades_referencia:
+        if cidade and cidade in n:
+            return True
+    return False
+
+
+def endereco_tem_uf_explicita(endereco):
+    txt = limpar(endereco)
+    if not txt or txt == "-":
+        return False
+    n = norm(txt)
+    # UF no formato ", SP" / "- SP" / " SP"
+    return re.search(r"(?:,\s*|-?\s+)(sp|rj|pa|ce)\b", n) is not None
+
+
+def inferir_localidade_por_endereco(endereco):
+    n = norm(endereco)
+    if not n:
+        return {"cidade": "", "uf": "", "bairro": "", "origem": ""}
+
+    for sigla, cidade_alias in ALIAS_LOCALIDADE_CLIENTE.items():
+        if re.search(rf"\b{re.escape(sigla)}\b", n):
+            return {"cidade": cidade_alias.upper(), "uf": "SP", "bairro": "", "origem": "ENDERECO_ALIAS"}
+
+    for cidade in MUNICIPIOS_HINT_CLIENTE:
+        if cidade and cidade in n:
+            cidade_padrao = cidade.upper()
+            if cidade_padrao == "SAO BERNARDO":
+                cidade_padrao = "SAO BERNARDO DO CAMPO"
+            return {
+                "cidade": cidade_padrao,
+                "uf": "SP",
+                "bairro": "",
+                "origem": "ENDERECO_MUNICIPIO",
+            }
+
+    for bairro in BAIRROS_SP_HINT_CLIENTE:
+        if bairro and bairro in n:
+            return {
+                "cidade": "SAO PAULO",
+                "uf": "SP",
+                "bairro": bairro.upper(),
+                "origem": "ENDERECO_BAIRRO",
+            }
+
+    return {"cidade": "", "uf": "", "bairro": "", "origem": ""}
+
+
+def inferir_localidade_por_cliente(cliente):
+    n = norm(cliente)
+    if not n:
+        return {"cidade": "", "uf": "", "bairro": "", "origem": ""}
+
+    for sigla, cidade_alias in ALIAS_LOCALIDADE_CLIENTE.items():
+        if re.search(rf"\b{re.escape(sigla)}\b", n):
+            return {"cidade": cidade_alias.upper(), "uf": "SP", "bairro": "", "origem": "CLIENTE_ALIAS"}
+
+    for cidade in MUNICIPIOS_HINT_CLIENTE:
+        if cidade and cidade in n:
+            cidade_padrao = cidade.upper()
+            if cidade_padrao == "SAO BERNARDO":
+                cidade_padrao = "SAO BERNARDO DO CAMPO"
+            return {"cidade": cidade_padrao, "uf": "SP", "bairro": "", "origem": "CLIENTE_MUNICIPIO"}
+
+    for bairro in BAIRROS_SP_HINT_CLIENTE:
+        if bairro and bairro in n:
+            return {
+                "cidade": "SAO PAULO",
+                "uf": "SP",
+                "bairro": bairro.upper(),
+                "origem": "CLIENTE_BAIRRO",
+            }
+
+    return {"cidade": "", "uf": "", "bairro": "", "origem": ""}
+
+
+def montar_endereco_consulta_rota(
+    endereco,
+    *,
+    cliente="",
+    cidade_tecnico="",
+    estado_tecnico="",
+    usar_hint_cliente=True,
+):
+    endereco_base = limpar(endereco)
+    if not endereco_base or endereco_base == "-":
+        return {
+            "consulta": "",
+            "origem_inferencia": "ENDERECO_VAZIO",
+            "cidade_inferida": "",
+            "uf_inferida": "",
+            "bairro_inferido": "",
+        }
+
+    if endereco_tem_localidade_explicita(endereco_base):
+        # Se já há cidade/bairro no endereço, mas sem UF, complementa para reduzir ambiguidade.
+        if not endereco_tem_uf_explicita(endereco_base) and not re.search(
+            r"\b\d{5}-?\d{3}\b", endereco_base
+        ):
+            hint_end = inferir_localidade_por_endereco(endereco_base)
+            cidade_end = limpar(hint_end.get("cidade", ""))
+            uf_end = limpar(hint_end.get("uf", "")) or limpar(estado_tecnico).upper() or "SP"
+            bairro_end = limpar(hint_end.get("bairro", ""))
+            origem_end = limpar(hint_end.get("origem", "")) or "ENDERECO_COMPLEMENTADO_UF"
+            if cidade_end:
+                n_base = norm(endereco_base)
+                cidade_norm = norm(cidade_end)
+                base_limpa = endereco_base.rstrip(" ,.-")
+                if cidade_norm and cidade_norm in n_base:
+                    consulta_end = f"{base_limpa} - {uf_end}"
+                else:
+                    consulta_end = f"{base_limpa}, {cidade_end} - {uf_end}"
+                return {
+                    "consulta": limpar(consulta_end),
+                    "origem_inferencia": origem_end,
+                    "cidade_inferida": cidade_end,
+                    "uf_inferida": uf_end,
+                    "bairro_inferido": bairro_end,
+                }
+        return {
+            "consulta": endereco_base,
+            "origem_inferencia": "ENDERECO_ORIGINAL",
+            "cidade_inferida": "",
+            "uf_inferida": "",
+            "bairro_inferido": "",
+        }
+
+    cidade = ""
+    uf = ""
+    bairro = ""
+    origem = ""
+
+    if usar_hint_cliente:
+        hint = inferir_localidade_por_cliente(cliente)
+        cidade = limpar(hint.get("cidade", ""))
+        uf = limpar(hint.get("uf", ""))
+        bairro = limpar(hint.get("bairro", ""))
+        origem = limpar(hint.get("origem", ""))
+
+    if not cidade:
+        cidade = limpar(cidade_tecnico).upper()
+        uf = (limpar(estado_tecnico).upper() or "SP") if cidade else ""
+        origem = "TECNICO_FALLBACK" if cidade else origem
+
+    if not cidade and not uf:
+        cidade = "SAO PAULO"
+        uf = "SP"
+        origem = "PADRAO_SP"
+
+    n_base = norm(endereco_base)
+    complemento = []
+    if bairro and norm(bairro) not in n_base:
+        complemento.append(bairro)
+
+    loc = cidade
+    if cidade and uf:
+        loc = f"{cidade} - {uf}"
+    elif uf:
+        loc = uf
+
+    if loc and norm(loc) not in n_base:
+        complemento.append(loc)
+
+    consulta = endereco_base if not complemento else f"{endereco_base}, {', '.join(complemento)}"
+    return {
+        "consulta": limpar(consulta),
+        "origem_inferencia": origem or "SEM_COMPLEMENTO",
+        "cidade_inferida": cidade,
+        "uf_inferida": uf,
+        "bairro_inferido": bairro,
+    }
+
+
+def preparar_enderecos_consulta_rota_da_linha(linha, regra_log):
+    origem_meta = montar_endereco_consulta_rota(
+        linha.get("ENDEREÇO DE PARTIDA", ""),
+        cliente="",
+        cidade_tecnico=linha.get("CIDADE", ""),
+        estado_tecnico=linha.get("ESTADO", ""),
+        usar_hint_cliente=False,
+    )
+    destino_meta = montar_endereco_consulta_rota(
+        linha.get("ENDEREÇO CLIENTE", ""),
+        cliente=linha.get("CLIENTE", ""),
+        cidade_tecnico=linha.get("CIDADE", ""),
+        estado_tecnico=linha.get("ESTADO", ""),
+        usar_hint_cliente=True,
+    )
+
+    origem_raw = limpar(linha.get("ENDEREÇO DE PARTIDA", ""))
+    destino_raw = limpar(linha.get("ENDEREÇO CLIENTE", ""))
+    origem_consulta = origem_meta.get("consulta", "")
+    destino_consulta = destino_meta.get("consulta", "")
+
+    if origem_consulta and origem_consulta != origem_raw:
+        registrar_alteracao_linha(
+            linha,
+            regra_log,
+            "ENDEREÇO DE PARTIDA (CONSULTA ROTA)",
+            origem_raw,
+            f"{origem_consulta} [{origem_meta.get('origem_inferencia', '')}]",
+        )
+    if destino_consulta and destino_consulta != destino_raw:
+        registrar_alteracao_linha(
+            linha,
+            regra_log,
+            "ENDEREÇO CLIENTE (CONSULTA ROTA)",
+            destino_raw,
+            f"{destino_consulta} [{destino_meta.get('origem_inferencia', '')}]",
+        )
+
+    return origem_consulta, destino_consulta
+
+
 def calcular_distancia_km_linha_reta(coord_origem, coord_destino):
     if coord_origem is None or coord_destino is None:
         return None
@@ -1411,25 +1801,30 @@ def calcular_distancia_km_linha_reta(coord_origem, coord_destino):
         return None
 
 
-def geocodificar_endereco(endereco):
+def _resultado_geo(coord, diag, retornar_diag):
+    return (coord, diag) if retornar_diag else coord
+
+
+def geocodificar_endereco(endereco, retornar_diag=False):
     global _ROTA_TENTATIVAS
 
     chave = norm(endereco)
     if not chave:
-        return None
+        return _resultado_geo(None, "ENDERECO_VAZIO", retornar_diag)
     if chave in _CACHE_GEO:
-        return _CACHE_GEO[chave]
+        return _resultado_geo(_CACHE_GEO[chave], "CACHE_GEO", retornar_diag)
     if _ROTA_TENTATIVAS >= ROTA_MAX_TENTATIVAS:
         _CACHE_GEO[chave] = None
-        return None
+        return _resultado_geo(None, "LIMITE_GLOBAL_TENTATIVAS", retornar_diag)
 
     endereco_consulta = normalizar_endereco_para_rota(endereco)
     if not endereco_consulta:
         _CACHE_GEO[chave] = None
-        return None
+        return _resultado_geo(None, "ENDERECO_NORMALIZADO_VAZIO", retornar_diag)
 
     consultas = [
         (
+            "NOMINATIM",
             "https://nominatim.openstreetmap.org/search?"
             + urlencode(
                 {
@@ -1441,6 +1836,7 @@ def geocodificar_endereco(endereco):
             _extrair_coord_nominatim,
         ),
         (
+            "PHOTON",
             "https://photon.komoot.io/api/?"
             + urlencode(
                 {
@@ -1452,85 +1848,149 @@ def geocodificar_endereco(endereco):
         ),
     ]
 
-    for url, extrator in consultas:
+    falhas = []
+    for nome_servico, url, extrator in consultas:
         if _ROTA_TENTATIVAS >= ROTA_MAX_TENTATIVAS:
+            falhas.append("LIMITE_GLOBAL_TENTATIVAS")
             break
         try:
-            _ROTA_TENTATIVAS += 1
-            dados = _http_get_json(url)
+            dados, erros_http = _http_get_json_com_retry(url)
+            if dados is None:
+                detalhe_http = " | ".join(erros_http) if erros_http else "SEM_RESPOSTA"
+                falhas.append(f"{nome_servico}:HTTP({detalhe_http})")
+                continue
             coord = extrator(dados)
             if coord is not None:
                 _CACHE_GEO[chave] = coord
-                return coord
-        except (HTTPError, URLError, TimeoutError, ValueError, KeyError, json.JSONDecodeError):
-            continue
-        except Exception:
-            continue
+                return _resultado_geo(coord, f"GEO_OK:{nome_servico}", retornar_diag)
+            falhas.append(f"{nome_servico}:SEM_COORDENADA")
+        except (HTTPError, URLError, TimeoutError, ValueError, KeyError, json.JSONDecodeError, OSError) as exc:
+            falhas.append(f"{nome_servico}:{_formatar_erro_http(exc)}")
+        except Exception as exc:
+            falhas.append(f"{nome_servico}:{_formatar_erro_http(exc)}")
 
     _CACHE_GEO[chave] = None
-    return None
+    diag = " | ".join(falhas) if falhas else "GEO_SEM_RESULTADO"
+    return _resultado_geo(None, diag, retornar_diag)
 
 
 def consultar_km_rota(origem, destino):
+    km, _ = consultar_km_rota_com_diagnostico(origem, destino)
+    return km
+
+
+def consultar_km_rota_com_diagnostico(origem, destino):
     global _ROTA_TENTATIVAS
 
     chave = (norm(origem), norm(destino))
     if chave in _CACHE_ROTA:
-        return _CACHE_ROTA[chave]
+        km_cache = _CACHE_ROTA[chave]
+        return km_cache, "CACHE_ROTA"
     if _ROTA_TENTATIVAS >= ROTA_MAX_TENTATIVAS:
         _CACHE_ROTA[chave] = None
-        return None
+        return None, "LIMITE_GLOBAL_TENTATIVAS"
 
     if not chave[0] or not chave[1]:
         _CACHE_ROTA[chave] = None
-        return None
+        return None, "ORIGEM_OU_DESTINO_VAZIO"
     if chave[0] == chave[1]:
         _CACHE_ROTA[chave] = 0
-        return 0
+        return 0, "ORIGEM_DESTINO_IGUAIS"
 
-    coord_origem = geocodificar_endereco(origem)
-    coord_destino = geocodificar_endereco(destino)
+    coord_origem, diag_geo_origem = geocodificar_endereco(origem, retornar_diag=True)
+    coord_destino, diag_geo_destino = geocodificar_endereco(destino, retornar_diag=True)
     if coord_origem is None or coord_destino is None:
         _CACHE_ROTA[chave] = None
-        return None
+        diag = (
+            f"GEO_FALHA | ORIGEM={limpar(origem)} | DESTINO={limpar(destino)} | "
+            f"GEO_ORIGEM={diag_geo_origem} | GEO_DESTINO={diag_geo_destino}"
+        )
+        return None, diag
     km_linha_reta = calcular_distancia_km_linha_reta(coord_origem, coord_destino)
 
     try:
         lat1, lon1 = coord_origem
         lat2, lon2 = coord_destino
-        _ROTA_TENTATIVAS += 1
         url = (
             "https://router.project-osrm.org/route/v1/driving/"
             f"{quote(str(lon1))},{quote(str(lat1))};{quote(str(lon2))},{quote(str(lat2))}"
             "?overview=false"
         )
-        dados = _http_get_json(url)
+        dados, erros_osrm = _http_get_json_com_retry(url)
+        if dados is None:
+            detalhe_osrm = " | ".join(erros_osrm) if erros_osrm else "SEM_RESPOSTA"
+            if km_linha_reta is not None:
+                km_aprox = max(int(math.ceil(km_linha_reta)), 0)
+                _CACHE_ROTA[chave] = km_aprox
+                diag = (
+                    f"OSRM_INDISPONIVEL_COM_FALLBACK | ORIGEM={limpar(origem)} | DESTINO={limpar(destino)} | "
+                    f"GEO_ORIGEM={diag_geo_origem} | GEO_DESTINO={diag_geo_destino} | "
+                    f"OSRM={detalhe_osrm} | LINHA_RETA_KM={km_aprox}"
+                )
+                return km_aprox, diag
+            _CACHE_ROTA[chave] = None
+            diag = (
+                f"OSRM_INDISPONIVEL_SEM_FALLBACK | ORIGEM={limpar(origem)} | DESTINO={limpar(destino)} | "
+                f"GEO_ORIGEM={diag_geo_origem} | GEO_DESTINO={diag_geo_destino} | OSRM={detalhe_osrm}"
+            )
+            return None, diag
+
         rotas = dados.get("routes", [])
         if not rotas:
             if km_linha_reta is not None:
                 km_aprox = max(int(math.ceil(km_linha_reta)), 0)
                 _CACHE_ROTA[chave] = km_aprox
-                return km_aprox
+                diag = (
+                    f"OSRM_SEM_ROTAS_COM_FALLBACK | ORIGEM={limpar(origem)} | DESTINO={limpar(destino)} | "
+                    f"GEO_ORIGEM={diag_geo_origem} | GEO_DESTINO={diag_geo_destino} | LINHA_RETA_KM={km_aprox}"
+                )
+                return km_aprox, diag
             _CACHE_ROTA[chave] = None
-            return None
+            diag = (
+                f"OSRM_SEM_ROTAS_SEM_FALLBACK | ORIGEM={limpar(origem)} | DESTINO={limpar(destino)} | "
+                f"GEO_ORIGEM={diag_geo_origem} | GEO_DESTINO={diag_geo_destino}"
+            )
+            return None, diag
         distancia_m = float(rotas[0].get("distance", 0))
         km = max(int(math.ceil(distancia_m / 1000.0)), 0)
         _CACHE_ROTA[chave] = km
-        return km
-    except (HTTPError, URLError, TimeoutError, ValueError, KeyError, json.JSONDecodeError):
+        diag = (
+            f"OSRM_OK | ORIGEM={limpar(origem)} | DESTINO={limpar(destino)} | "
+            f"GEO_ORIGEM={diag_geo_origem} | GEO_DESTINO={diag_geo_destino} | KM={km}"
+        )
+        return km, diag
+    except (HTTPError, URLError, TimeoutError, ValueError, KeyError, json.JSONDecodeError, OSError) as exc:
         if km_linha_reta is not None:
             km_aprox = max(int(math.ceil(km_linha_reta)), 0)
             _CACHE_ROTA[chave] = km_aprox
-            return km_aprox
+            diag = (
+                f"OSRM_EXCEPTION_COM_FALLBACK | ORIGEM={limpar(origem)} | DESTINO={limpar(destino)} | "
+                f"GEO_ORIGEM={diag_geo_origem} | GEO_DESTINO={diag_geo_destino} | "
+                f"ERRO={_formatar_erro_http(exc)} | LINHA_RETA_KM={km_aprox}"
+            )
+            return km_aprox, diag
         _CACHE_ROTA[chave] = None
-        return None
-    except Exception:
+        diag = (
+            f"OSRM_EXCEPTION_SEM_FALLBACK | ORIGEM={limpar(origem)} | DESTINO={limpar(destino)} | "
+            f"GEO_ORIGEM={diag_geo_origem} | GEO_DESTINO={diag_geo_destino} | ERRO={_formatar_erro_http(exc)}"
+        )
+        return None, diag
+    except Exception as exc:
         if km_linha_reta is not None:
             km_aprox = max(int(math.ceil(km_linha_reta)), 0)
             _CACHE_ROTA[chave] = km_aprox
-            return km_aprox
+            diag = (
+                f"OSRM_EXCEPTION_GEN_COM_FALLBACK | ORIGEM={limpar(origem)} | DESTINO={limpar(destino)} | "
+                f"GEO_ORIGEM={diag_geo_origem} | GEO_DESTINO={diag_geo_destino} | "
+                f"ERRO={_formatar_erro_http(exc)} | LINHA_RETA_KM={km_aprox}"
+            )
+            return km_aprox, diag
         _CACHE_ROTA[chave] = None
-        return None
+        diag = (
+            f"OSRM_EXCEPTION_GEN_SEM_FALLBACK | ORIGEM={limpar(origem)} | DESTINO={limpar(destino)} | "
+            f"GEO_ORIGEM={diag_geo_origem} | GEO_DESTINO={diag_geo_destino} | ERRO={_formatar_erro_http(exc)}"
+        )
+        return None, diag
 
 
 # -------------------------
@@ -2120,6 +2580,28 @@ def extrair_atividade_realizada_fallback(bloco):
     return ""
 
 
+def extrair_created_at_prefixo(bloco):
+    tz = ZoneInfo(TIMEZONE_PADRAO)
+    for linha in bloco:
+        m = re.match(
+            r"^\s*(\d{1,2}[\/\.-]\d{1,2}[\/\.-]\d{2,4})\s+(\d{1,2}:\d{2})\s*-\s*",
+            str(linha),
+        )
+        if not m:
+            continue
+        data_txt = converter_data(m.group(1))
+        hora_txt = normalizar_hora(m.group(2))
+        if not data_txt or not hora_txt:
+            continue
+        try:
+            dt_naive = datetime.strptime(f"{data_txt} {hora_txt}", "%d/%m/%Y %H:%M")
+            dt_aware = dt_naive.replace(tzinfo=tz)
+            return dt_aware.isoformat()
+        except ValueError:
+            continue
+    return ""
+
+
 # -------------------------
 # BLOCO H: PARSE DO RAT E REGRAS DE NEGOCIO POR REGISTRO
 # -------------------------
@@ -2185,6 +2667,8 @@ def parse_rat(bloco, tecnicos_regras=None):
 
     if not d["DATA"]:
         d["DATA"] = extrair_data_do_prefixo(bloco)
+
+    d["_CREATED_AT"] = extrair_created_at_prefixo(bloco)
 
     return d
 
@@ -2280,6 +2764,7 @@ def forcar_maiusculas(registro):
     out["_LOGS"] = list(registro.get("_LOGS", []))
     out["_TEM_INCONSISTENCIA"] = bool(registro.get("_TEM_INCONSISTENCIA", False))
     out["_TIPO_REGISTRO"] = registro.get("_TIPO_REGISTRO", "")
+    out["_CREATED_AT"] = registro.get("_CREATED_AT", "")
     return out
 
 
@@ -2306,6 +2791,26 @@ def hora_sort_key(valor):
     if m:
         return int(m.group(1))
     return 9999
+
+
+def hora_score_desc_retorno(valor):
+    h = normalizar_hora(valor)
+    if not h:
+        return -1
+    m = re.fullmatch(r"([01]\d|2[0-3]):([0-5]\d)", h)
+    if not m:
+        return -1
+    return (int(m.group(1)) * 60) + int(m.group(2))
+
+
+def hora_score_asc_inicio_dia(valor):
+    h = normalizar_hora(valor)
+    if not h:
+        return 9999
+    m = re.fullmatch(r"([01]\d|2[0-3]):([0-5]\d)", h)
+    if not m:
+        return 9999
+    return (int(m.group(1)) * 60) + int(m.group(2))
 
 
 def extrair_chamados(chamado_txt):
@@ -2475,6 +2980,15 @@ def registrar_alteracao_linha(linha, regra, campo, valor_anterior, valor_final):
     )
 
 
+def atualizar_campo_com_log(linha, regra, campo, valor_novo):
+    ant = limpar(linha.get(campo, ""))
+    dep = limpar(valor_novo)
+    if ant == dep:
+        return
+    linha[campo] = dep
+    registrar_alteracao_linha(linha, regra, campo, ant, dep)
+
+
 def log_da_linha(linha):
     linha = aplicar_compatibilidade_chaves(dict(linha) if isinstance(linha, dict) else {})
     logs = []
@@ -2528,6 +3042,362 @@ def sort_key_registro(linha):
     )
 
 
+def chamado_para_int(chamado_txt):
+    nums = re.findall(r"\d+", limpar(chamado_txt))
+    if not nums:
+        return -1
+    try:
+        return int(nums[-1])
+    except ValueError:
+        return -1
+
+
+def parse_created_at(valor):
+    txt = limpar(valor)
+    if not txt:
+        return None
+    try:
+        dt_obj = datetime.fromisoformat(txt)
+    except ValueError:
+        return None
+    if dt_obj.tzinfo is None:
+        return dt_obj.replace(tzinfo=ZoneInfo(TIMEZONE_PADRAO))
+    return dt_obj
+
+
+def chave_ordenacao_retorno(linha):
+    termino = hora_score_desc_retorno(linha.get("TÉRMINO DA ATIVIDADE", ""))
+    inicio = hora_score_desc_retorno(linha.get("INICIO DA ATIVIDADE", ""))
+    chamado = chamado_para_int(linha.get("CHAMADO", ""))
+    created_at = parse_created_at(linha.get("_CREATED_AT", ""))
+    created_score = int(created_at.timestamp()) if created_at else -1
+    ordem = int(linha.get("_RETORNO_ORDEM_IDX", -1))
+    return (termino, inicio, chamado, created_score, ordem)
+
+
+def chave_ordenacao_dia_inicio(linha):
+    termino = hora_score_asc_inicio_dia(linha.get("TÉRMINO DA ATIVIDADE", ""))
+    inicio = hora_score_asc_inicio_dia(linha.get("INICIO DA ATIVIDADE", ""))
+    chamado = chamado_para_int(linha.get("CHAMADO", ""))
+    created_at = parse_created_at(linha.get("_CREATED_AT", ""))
+    created_score = int(created_at.timestamp()) if created_at else 9999999999
+    ordem = int(linha.get("_RETORNO_ORDEM_IDX", 999999999))
+    return (inicio, termino, chamado, created_score, ordem)
+
+
+def marcar_pendencia_km(linha, motivo):
+    if limpar(linha.get("STATUS VALIDAÇÃO KM", "")) != "PENDENTE REVISAO":
+        atualizar_campo_com_log(
+            linha,
+            "VALIDACAO KM",
+            "STATUS VALIDAÇÃO KM",
+            "PENDENTE REVISAO",
+        )
+    adicionar_motivo_validacao_km(linha, motivo, regra="VALIDACAO KM")
+
+    linha["_TEM_INCONSISTENCIA"] = True
+
+
+def adicionar_motivo_validacao_km(linha, motivo, regra="VALIDACAO KM"):
+    motivo_txt = limpar(motivo).upper()
+    if not motivo_txt:
+        return
+    motivo_ant = limpar(linha.get("MOTIVO VALIDAÇÃO KM", ""))
+    partes = [p.strip() for p in motivo_ant.split(" | ") if limpar(p)]
+    if motivo_txt in partes:
+        return
+    novo_motivo = motivo_txt if not motivo_ant else f"{motivo_ant} | {motivo_txt}"
+    atualizar_campo_com_log(linha, regra, "MOTIVO VALIDAÇÃO KM", novo_motivo)
+
+
+def montar_info_retorno_por_ordenacao(registros):
+    grupos = {}
+    for r in registros:
+        if norm(r.get("_TIPO_REGISTRO", "")) == "retorno_base":
+            continue
+        tecnico = limpar(r.get("TÉCNICO", ""))
+        data = limpar(r.get("DATA", ""))
+        if not tecnico or not data:
+            continue
+        grupos.setdefault((norm(tecnico), data), []).append(r)
+
+    saida = {}
+    for chave, itens in grupos.items():
+        ultimo = max(itens, key=chave_ordenacao_retorno)
+        saida[chave] = {
+            "DATA": limpar(ultimo.get("DATA", "")),
+            "TÉCNICO": limpar(ultimo.get("TÉCNICO", "")),
+            "ULTIMO_ENDERECO_CLIENTE": limpar(
+                ultimo.get("_RETORNO_ENDERECO_CLIENTE_BASE", ultimo.get("ENDEREÇO CLIENTE", ""))
+            ),
+            "ULTIMO_KM_FINAL": limpar(ultimo.get("_RETORNO_KM_FINAL_BASE", ultimo.get("KM FINAL", ""))),
+            "ULTIMO_INICIO": limpar(ultimo.get("INICIO DA ATIVIDADE", "")),
+            "ULTIMO_TERMINO": limpar(ultimo.get("TÉRMINO DA ATIVIDADE", "")),
+            "_ORDEM": int(ultimo.get("_RETORNO_ORDEM_IDX", -1)),
+        }
+    return saida
+
+
+def aplicar_validacoes_km_avancadas(registros):
+    grupos = {}
+    for r in registros:
+        if norm(r.get("_TIPO_REGISTRO", "")) == "retorno_base":
+            continue
+        tecnico = limpar(r.get("TÉCNICO", ""))
+        data = limpar(r.get("DATA", ""))
+        if not tecnico or not data:
+            continue
+        grupos.setdefault((norm(tecnico), data), []).append(r)
+
+    for _, itens in grupos.items():
+        itens_asc = sorted(itens, key=chave_ordenacao_dia_inicio)
+        itens_desc = sorted(itens, key=chave_ordenacao_retorno, reverse=True)
+
+        km_rat_por_linha = {}
+        km_rota_por_linha = {}
+        def obter_km_rat_atual(linha):
+            km_ini_int_local = km_para_int(linha.get("KM INICIAL", ""))
+            km_fim_ref_local = linha.get("_RETORNO_KM_FINAL_BASE", linha.get("KM FINAL", ""))
+            km_fim_int_local = km_para_int(km_fim_ref_local)
+            if km_ini_int_local is None or km_fim_int_local is None:
+                return km_ini_int_local, None
+            return km_ini_int_local, (km_fim_int_local - km_ini_int_local)
+
+        def consultar_rota_com_tolerancia(linha, regra_log, motivo_sem_endereco, motivo_sem_rota):
+            origem_consulta, destino_consulta = preparar_enderecos_consulta_rota_da_linha(
+                linha, regra_log
+            )
+            if not origem_consulta or not destino_consulta:
+                marcar_pendencia_km(linha, motivo_sem_endereco)
+                registrar_alteracao_linha(
+                    linha,
+                    regra_log,
+                    "DIAGNOSTICO ROTA",
+                    "",
+                    (
+                        "SEM_ENDERECO_PARA_ROTA"
+                        f" | ORIGEM={limpar(origem_consulta)}"
+                        f" | DESTINO={limpar(destino_consulta)}"
+                    ),
+                )
+                return None, None
+
+            km_rota = consultar_km_rota(origem_consulta, destino_consulta)
+            if km_rota is None or int(km_rota) <= 0:
+                _, diagnostico_rota = consultar_km_rota_com_diagnostico(origem_consulta, destino_consulta)
+                marcar_pendencia_km(linha, motivo_sem_rota)
+                registrar_alteracao_linha(
+                    linha,
+                    regra_log,
+                    "DIAGNOSTICO ROTA",
+                    "",
+                    limpar(diagnostico_rota),
+                )
+                return None, None
+
+            km_rota_int = int(km_rota)
+            km_rota_por_linha[id(linha)] = km_rota_int
+            atualizar_campo_com_log(
+                linha,
+                regra_log,
+                "KM ROTA REFERÊNCIA",
+                str(km_rota_int),
+            )
+            tolerancia = max(10, int(math.ceil(km_rota_int * 0.2)))
+            atualizar_campo_com_log(
+                linha,
+                regra_log,
+                "TOLERÂNCIA ROTA KM",
+                str(tolerancia),
+            )
+            return km_rota_int, tolerancia
+
+        def ajustar_km_por_rota(linha, km_ini_int_local, km_rota_int, regra_log, motivo_autoajuste):
+            novo_km_final = km_ini_int_local + int(km_rota_int)
+            atualizar_campo_com_log(
+                linha,
+                regra_log,
+                "KM FINAL",
+                str(novo_km_final),
+            )
+            linha["_RETORNO_KM_FINAL_BASE"] = str(novo_km_final)
+            km_rat_novo = novo_km_final - km_ini_int_local
+            atualizar_campo_com_log(
+                linha,
+                regra_log,
+                "KM PERCORRIDO",
+                str(km_rat_novo),
+            )
+            adicionar_motivo_validacao_km(
+                linha,
+                motivo_autoajuste,
+                regra=regra_log,
+            )
+            return km_rat_novo
+
+        # Passo 1: validação base por RAT e autocorreção para KM <= 0.
+        for r in itens:
+            km_ini_int, km_rat = obter_km_rat_atual(r)
+            if km_ini_int is None or km_rat is None:
+                atualizar_campo_com_log(r, "VALIDACAO KM", "KM PERCORRIDO", "")
+                continue
+
+            if km_rat <= 0:
+                km_rota_int, _ = consultar_rota_com_tolerancia(
+                    r,
+                    regra_log="AUTOAJUSTE KM NEGATIVO POR ROTA",
+                    motivo_sem_endereco="KM_NEGATIVO_E_ENDERECO_INSUFICIENTE",
+                    motivo_sem_rota="KM_NEGATIVO_E_ROTA_INDISPONIVEL",
+                )
+                if km_rota_int is not None:
+                    km_rat = ajustar_km_por_rota(
+                        r,
+                        km_ini_int,
+                        km_rota_int,
+                        regra_log="AUTOAJUSTE KM NEGATIVO POR ROTA",
+                        motivo_autoajuste="AUTOAJUSTADO_POR_ROTA_KM_NEGATIVO",
+                    )
+                else:
+                    marcar_pendencia_km(r, "KM_PERCORRIDO_INVALIDO")
+
+            atualizar_campo_com_log(r, "VALIDACAO KM", "KM PERCORRIDO", str(km_rat))
+            km_rat_por_linha[id(r)] = km_rat
+            if km_rat <= 0:
+                marcar_pendencia_km(r, "KM_PERCORRIDO_INVALIDO")
+
+        # Passo 2: regra diária após possíveis autocorreções.
+        primeiro_km_ini_int = None
+        for r in itens_asc:
+            km_ini_int = km_para_int(r.get("KM INICIAL", ""))
+            if km_ini_int is not None:
+                primeiro_km_ini_int = km_ini_int
+                break
+
+        ultimo_km_final_int = None
+        for r in itens_desc:
+            km_fim_ref = r.get("_RETORNO_KM_FINAL_BASE", r.get("KM FINAL", ""))
+            km_fim_int = km_para_int(km_fim_ref)
+            if km_fim_int is not None:
+                ultimo_km_final_int = km_fim_int
+                break
+
+        km_dia = None
+        if primeiro_km_ini_int is not None and ultimo_km_final_int is not None:
+            km_dia = ultimo_km_final_int - primeiro_km_ini_int
+            for r in itens:
+                atualizar_campo_com_log(r, "VALIDACAO KM", "KM DIA", str(km_dia))
+
+        # Passo 3: revisão completa por rota quando o total do dia > 150 km.
+        if km_dia is not None and km_dia > 150:
+            for r in itens:
+                km_ini_int, km_rat = obter_km_rat_atual(r)
+                if km_ini_int is None or km_rat is None:
+                    continue
+
+                km_rota_int, tolerancia = consultar_rota_com_tolerancia(
+                    r,
+                    regra_log="REVISAO COMPLETA KM DIA > 150",
+                    motivo_sem_endereco="REVISAO_150KM_SEM_ENDERECO",
+                    motivo_sem_rota="REVISAO_150KM_ROTA_INDISPONIVEL",
+                )
+                if km_rota_int is None:
+                    continue
+
+                diff = abs(km_rat - km_rota_int)
+                if diff > tolerancia:
+                    km_rat = ajustar_km_por_rota(
+                        r,
+                        km_ini_int,
+                        km_rota_int,
+                        regra_log="REVISAO COMPLETA KM DIA > 150",
+                        motivo_autoajuste="AUTOAJUSTADO_REVISAO_COMPLETA_150KM",
+                    )
+                    km_rat_por_linha[id(r)] = km_rat
+
+        # Passo 4: outlier estatístico por mediana (com autoajuste quando divergir da rota).
+        positivos = [v for v in km_rat_por_linha.values() if isinstance(v, (int, float)) and v > 0]
+        if positivos:
+            med = median(positivos)
+            for r in itens:
+                km_ini_int, km_rat = obter_km_rat_atual(r)
+                if km_ini_int is None or km_rat is None or km_rat <= 0:
+                    continue
+                if med <= 0 or not (km_rat > (2.5 * med) and (km_rat - med) >= 20):
+                    continue
+
+                km_rota_int, tolerancia = consultar_rota_com_tolerancia(
+                    r,
+                    regra_log="AUTOAJUSTE OUTLIER POR ROTA",
+                    motivo_sem_endereco="OUTLIER_SEM_ENDERECO_PARA_ROTA",
+                    motivo_sem_rota="OUTLIER_ROTA_INDISPONIVEL",
+                )
+                if km_rota_int is None:
+                    marcar_pendencia_km(r, f"OUTLIER_MEDIANA_DIA (MEDIANA={int(round(med))}KM)")
+                    continue
+
+                diff = abs(km_rat - km_rota_int)
+                if diff > tolerancia:
+                    km_rat = ajustar_km_por_rota(
+                        r,
+                        km_ini_int,
+                        km_rota_int,
+                        regra_log="AUTOAJUSTE OUTLIER POR ROTA",
+                        motivo_autoajuste="AUTOAJUSTADO_POR_ROTA_OUTLIER",
+                    )
+                    km_rat_por_linha[id(r)] = km_rat
+                else:
+                    # Outlier estatístico sem divergência geográfica relevante: apenas registra.
+                    adicionar_motivo_validacao_km(
+                        r,
+                        f"OUTLIER_MEDIANA_DIA (MEDIANA={int(round(med))}KM)",
+                        regra="VALIDACAO KM",
+                    )
+
+        # Passo 5: ajuste sugerido (sem autoaplicar) para os pendentes restantes.
+        if primeiro_km_ini_int is not None:
+            corrente = primeiro_km_ini_int
+            for r in itens_asc:
+                km_base = km_rota_por_linha.get(id(r))
+                if km_base is None:
+                    km_base = km_rat_por_linha.get(id(r))
+                if km_base is None or km_base <= 0:
+                    continue
+                sugerido_ini = corrente
+                sugerido_fim = corrente + int(km_base)
+                if norm(r.get("STATUS VALIDAÇÃO KM", "")) == norm("PENDENTE REVISAO"):
+                    atualizar_campo_com_log(
+                        r,
+                        "VALIDACAO KM - AJUSTE SUGERIDO",
+                        "AJUSTE SUGERIDO KM INICIAL",
+                        str(sugerido_ini),
+                    )
+                    atualizar_campo_com_log(
+                        r,
+                        "VALIDACAO KM - AJUSTE SUGERIDO",
+                        "AJUSTE SUGERIDO KM FINAL",
+                        str(sugerido_fim),
+                    )
+                corrente = sugerido_fim
+
+        # Passo 6: status final de validação.
+        for r in itens:
+            if not limpar(r.get("STATUS VALIDAÇÃO KM", "")):
+                if r.get("KM PERCORRIDO", ""):
+                    atualizar_campo_com_log(
+                        r,
+                        "VALIDACAO KM",
+                        "STATUS VALIDAÇÃO KM",
+                        "APROVADO",
+                    )
+                else:
+                    atualizar_campo_com_log(
+                        r,
+                        "VALIDACAO KM",
+                        "STATUS VALIDAÇÃO KM",
+                        "SEM DADOS",
+                    )
+
+
 def criar_registro_retorno_base(info_ultimo, arq_origem, tecnicos_regras=None):
     tecnico = limpar(info_ultimo.get("TÉCNICO", ""))
     data = limpar(info_ultimo.get("DATA", ""))
@@ -2577,7 +3447,40 @@ def criar_registro_retorno_base(info_ultimo, arq_origem, tecnicos_regras=None):
     km_inicial_int = km_para_int(ultimo_km_final)
     if km_inicial_int is not None:
         linha["KM INICIAL"] = str(km_inicial_int)
-        km_rota = consultar_km_rota(ultimo_endereco_cliente, endereco_base)
+        origem_meta = montar_endereco_consulta_rota(
+            ultimo_endereco_cliente,
+            cliente="",
+            cidade_tecnico=cidade,
+            estado_tecnico=estado,
+            usar_hint_cliente=False,
+        )
+        destino_meta = montar_endereco_consulta_rota(
+            endereco_base,
+            cliente="",
+            cidade_tecnico=cidade,
+            estado_tecnico=estado,
+            usar_hint_cliente=False,
+        )
+        origem_consulta = origem_meta.get("consulta", "")
+        destino_consulta = destino_meta.get("consulta", "")
+        if origem_consulta and origem_consulta != limpar(ultimo_endereco_cliente):
+            registrar_alteracao_linha(
+                linha,
+                "RETORNO BASE - ENDERECO CONSULTA ROTA",
+                "ENDEREÇO DE PARTIDA (CONSULTA ROTA)",
+                ultimo_endereco_cliente,
+                f"{origem_consulta} [{origem_meta.get('origem_inferencia', '')}]",
+            )
+        if destino_consulta and destino_consulta != limpar(endereco_base):
+            registrar_alteracao_linha(
+                linha,
+                "RETORNO BASE - ENDERECO CONSULTA ROTA",
+                "ENDEREÇO CLIENTE (CONSULTA ROTA)",
+                endereco_base,
+                f"{destino_consulta} [{destino_meta.get('origem_inferencia', '')}]",
+            )
+
+        km_rota = consultar_km_rota(origem_consulta, destino_consulta)
         if km_rota is not None:
             linha["KM FINAL"] = str(km_inicial_int + int(km_rota))
             registrar_alteracao_linha(
@@ -2680,10 +3583,10 @@ def montar_linhas(arq, data_inicio=None, data_fim=None, tecnicos_regras=None):
 
     ultimo_endereco = {}
     ultimo_registro_mesmo_dia = {}
-    ultimo_info_retorno = {}
     mascara_endereco = ENDERECO_REGRAS.get("mascara_valor", "-")
     for idx_resultado, r in enumerate(resultado):
         chave = (norm(r["TÉCNICO"]), r["DATA"])
+        r["_RETORNO_ORDEM_IDX"] = idx_resultado
 
         if chave not in ultimo_endereco:
             r["ENDEREÇO DE PARTIDA"] = base_tecnico(r["TÉCNICO"], tecnicos_regras=tecnicos_regras)
@@ -2733,18 +3636,8 @@ def montar_linhas(arq, data_inicio=None, data_fim=None, tecnicos_regras=None):
             "ENDEREÇO DE PARTIDA": r["ENDEREÇO DE PARTIDA"],
             "ENDEREÇO CLIENTE": r["ENDEREÇO CLIENTE"],
         }
-        candidato_info = {
-            "DATA": r.get("DATA", ""),
-            "TÉCNICO": r.get("TÉCNICO", ""),
-            "ULTIMO_ENDERECO_CLIENTE": snapshot.get("ENDEREÇO CLIENTE", ""),
-            "ULTIMO_KM_FINAL": snapshot.get("KM FINAL", ""),
-            "ULTIMO_INICIO": r.get("INICIO DA ATIVIDADE", ""),
-            "ULTIMO_TERMINO": r.get("TÉRMINO DA ATIVIDADE", ""),
-            "_ORDEM": idx_resultado,
-        }
-        info_atual = ultimo_info_retorno.get(chave)
-        if deve_substituir_info_retorno(info_atual, candidato_info):
-            ultimo_info_retorno[chave] = candidato_info
+        r["_RETORNO_ENDERECO_CLIENTE_BASE"] = snapshot.get("ENDEREÇO CLIENTE", "")
+        r["_RETORNO_KM_FINAL_BASE"] = snapshot.get("KM FINAL", "")
 
         anterior = ultimo_registro_mesmo_dia.get(chave)
         if anterior:
@@ -2823,6 +3716,9 @@ def montar_linhas(arq, data_inicio=None, data_fim=None, tecnicos_regras=None):
 
         ultimo_registro_mesmo_dia[chave] = snapshot
 
+    aplicar_validacoes_km_avancadas(resultado)
+    ultimo_info_retorno = montar_info_retorno_por_ordenacao(resultado)
+
     retornos = []
     for chave in sorted(ultimo_info_retorno.keys(), key=lambda x: (x[0], data_sort_key(x[1]))):
         info = ultimo_info_retorno[chave]
@@ -2858,10 +3754,6 @@ def linha_para_exportacao(linha):
     for campo_interno in CAMPOS:
         campo_saida = MAPA_CAMPOS_EXPORTACAO.get(campo_interno, campo_interno)
         out[campo_saida] = limpar(linha.get(campo_interno, ""))
-    out["KM PERCORRIDO"] = calcular_km_percorrido(
-        linha.get("KM INICIAL", ""),
-        linha.get("KM FINAL", ""),
-    )
     return out
 
 
@@ -2872,6 +3764,123 @@ def log_para_exportacao(log):
         campo_saida = MAPA_COLUNAS_LOG_EXPORTACAO.get(campo_interno, campo_interno)
         out[campo_saida] = limpar(log.get(campo_interno, ""))
     return out
+
+
+def garantir_pasta_arquivo(path):
+    pasta = os.path.dirname(path)
+    if pasta:
+        os.makedirs(pasta, exist_ok=True)
+
+
+def append_jsonl(path, linhas):
+    if not linhas:
+        return 0
+    garantir_pasta_arquivo(path)
+    qtd = 0
+    with open(path, "a", encoding="utf-8") as f:
+        for item in linhas:
+            f.write(json.dumps(item, ensure_ascii=False) + "\n")
+            qtd += 1
+    return qtd
+
+
+def persistir_historico_execucao(registros, arquivo_saida, execution_id):
+    agora = datetime.now(ZoneInfo(TIMEZONE_PADRAO)).isoformat()
+    eventos_rats = []
+    eventos_validacao = []
+
+    for r in registros:
+        tipo = norm(r.get("_TIPO_REGISTRO", "")) or "rat"
+        item_base = {
+            "execution_id": execution_id,
+            "processed_at": agora,
+            "arquivo_saida": arquivo_saida,
+            "arquivo_origem": limpar(r.get("_ARQUIVO_ORIGEM", "")),
+            "tipo_registro": tipo,
+            "data": limpar(r.get("DATA", "")),
+            "tecnico": limpar(r.get("TÉCNICO", "")),
+            "chamado": limpar(r.get("CHAMADO", "")),
+            "cliente": limpar(r.get("CLIENTE", "")),
+            "km_inicial": limpar(r.get("KM INICIAL", "")),
+            "km_final": limpar(r.get("KM FINAL", "")),
+            "inicio_atividade": limpar(r.get("INICIO DA ATIVIDADE", "")),
+            "termino_atividade": limpar(r.get("TÉRMINO DA ATIVIDADE", "")),
+            "endereco_partida": limpar(r.get("ENDEREÇO DE PARTIDA", "")),
+            "endereco_cliente": limpar(r.get("ENDEREÇO CLIENTE", "")),
+            "status": limpar(r.get("STATUS", "")),
+            "status_validacao_km": limpar(r.get("STATUS VALIDAÇÃO KM", "")),
+            "motivo_validacao_km": limpar(r.get("MOTIVO VALIDAÇÃO KM", "")),
+            "ajuste_sugerido_km_inicial": limpar(r.get("AJUSTE SUGERIDO KM INICIAL", "")),
+            "ajuste_sugerido_km_final": limpar(r.get("AJUSTE SUGERIDO KM FINAL", "")),
+        }
+        eventos_rats.append(item_base)
+
+        if tipo == "retorno_base":
+            continue
+        eventos_validacao.append(
+            {
+                "execution_id": execution_id,
+                "processed_at": agora,
+                "arquivo_saida": arquivo_saida,
+                "arquivo_origem": limpar(r.get("_ARQUIVO_ORIGEM", "")),
+                "data": limpar(r.get("DATA", "")),
+                "tecnico": limpar(r.get("TÉCNICO", "")),
+                "chamado": limpar(r.get("CHAMADO", "")),
+                "km_percorrido": limpar(r.get("KM PERCORRIDO", "")),
+                "km_dia": limpar(r.get("KM DIA", "")),
+                "km_rota_referencia": limpar(r.get("KM ROTA REFERÊNCIA", "")),
+                "tolerancia_km": limpar(r.get("TOLERÂNCIA ROTA KM", "")),
+                "status_validacao_km": limpar(r.get("STATUS VALIDAÇÃO KM", "")),
+                "motivo_validacao_km": limpar(r.get("MOTIVO VALIDAÇÃO KM", "")),
+                "ajuste_sugerido_km_inicial": limpar(r.get("AJUSTE SUGERIDO KM INICIAL", "")),
+                "ajuste_sugerido_km_final": limpar(r.get("AJUSTE SUGERIDO KM FINAL", "")),
+            }
+        )
+
+    qtd_rats = append_jsonl(HISTORICO_RATS_PATH, eventos_rats)
+    qtd_validacoes = append_jsonl(HISTORICO_VALIDACOES_KM_PATH, eventos_validacao)
+    return qtd_rats, qtd_validacoes
+
+
+def persistir_auditoria_ajustes(registros, arquivo_saida, execution_id):
+    agora = datetime.now(ZoneInfo(TIMEZONE_PADRAO)).isoformat()
+    eventos = []
+    campos_auditoria = {
+        "KM INICIAL",
+        "KM FINAL",
+        "KM PERCORRIDO",
+        "KM DIA",
+        "KM ROTA REFERÊNCIA",
+        "TOLERÂNCIA ROTA KM",
+        "STATUS VALIDAÇÃO KM",
+        "MOTIVO VALIDAÇÃO KM",
+        "AJUSTE SUGERIDO KM INICIAL",
+        "AJUSTE SUGERIDO KM FINAL",
+    }
+    for r in registros:
+        for ev in r.get("_LOGS", []):
+            regra = limpar(ev.get("REGRA", ""))
+            campo = limpar(ev.get("CAMPO", ""))
+            if "VALIDACAO KM" not in norm(regra) and campo not in campos_auditoria:
+                continue
+            eventos.append(
+                {
+                    "execution_id": execution_id,
+                    "processed_at": agora,
+                    "arquivo_saida": arquivo_saida,
+                    "arquivo_origem": limpar(r.get("_ARQUIVO_ORIGEM", "")),
+                    "data": limpar(r.get("DATA", "")),
+                    "tecnico": limpar(r.get("TÉCNICO", "")),
+                    "chamado": limpar(r.get("CHAMADO", "")),
+                    "regra": regra,
+                    "campo": campo,
+                    "valor_original": limpar(ev.get("VALOR ANTERIOR", "")),
+                    "valor_sugerido": limpar(ev.get("VALOR FINAL", "")),
+                    "aprovado_por": "",
+                    "aprovado_em": "",
+                }
+            )
+    return append_jsonl(AUDITORIA_AJUSTES_PATH, eventos)
 
 
 # -------------------------
@@ -2906,6 +3915,7 @@ def gerar_excel(
         somente_inconsistencias = bool(somente_inconsistencias)
 
     tecnicos_regras_ativos = montar_tecnicos_regras_ativas(regras_tecnicos_extra)
+    execution_id = datetime.now(ZoneInfo(TIMEZONE_PADRAO)).strftime("%Y%m%d%H%M%S%f")
     data_inicio_dt = normalizar_data_filtro(data_inicio, "Data inicial")
     data_fim_dt = normalizar_data_filtro(data_fim, "Data final")
     if (
@@ -2992,6 +4002,17 @@ def gerar_excel(
         df.to_excel(writer, index=False, sheet_name="DADOS")
         df_log.to_excel(writer, index=False, sheet_name="LOG")
 
+    qtd_hist_rats, qtd_hist_validacoes = persistir_historico_execucao(
+        registros_unicos,
+        arquivo_saida=saida,
+        execution_id=execution_id,
+    )
+    qtd_auditoria = persistir_auditoria_ajustes(
+        registros_unicos,
+        arquivo_saida=saida,
+        execution_id=execution_id,
+    )
+
     qtd_duplicados = len(todas) - len(registros_unicos)
     print(
         f"{len(df)} registros gerados com sucesso! "
@@ -3005,5 +4026,9 @@ def gerar_excel(
         "registros_apos_filtros": len(registros_filtrados),
         "logs_gerados": len(df_log),
         "arquivo_saida": saida,
+        "execution_id": execution_id,
+        "historico_rats_persistidos": qtd_hist_rats,
+        "historico_validacoes_km_persistidos": qtd_hist_validacoes,
+        "auditoria_ajustes_persistidos": qtd_auditoria,
     }
 
