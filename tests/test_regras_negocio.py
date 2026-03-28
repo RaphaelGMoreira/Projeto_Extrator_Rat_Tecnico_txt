@@ -5,7 +5,9 @@ from extrator import (
     atividade_realizada_semantica_valida,
     aplicar_validacoes_km_avancadas,
     base_tecnico,
+    carregar_catalogo_padroes_rats,
     categoria,
+    classificar_bloco_padrao_rat,
     converter_data,
     deve_substituir_info_retorno,
     detectar_tecnico,
@@ -385,4 +387,112 @@ def test_endereco_com_cidade_sem_uf_complementa_sp():
     )
     assert "MAUA - SP" in meta["consulta"]
     assert meta["origem_inferencia"] in {"ENDERECO_MUNICIPIO", "ENDERECO_ALIAS", "ENDERECO_COMPLEMENTADO_UF"}
+
+
+def test_classificar_bloco_padrao_rat_conhecido():
+    catalogo = carregar_catalogo_padroes_rats(criar_se_ausente=False)
+    bloco = [
+        "TÉCNICO: ALAN GOMES",
+        "DATA: 19/03/2026",
+        "CLIENTE: CLIENTE X",
+        "CHAMADO: 533576",
+        "KM INICIAL: 63507",
+        "KM FINAL: 63521",
+        "ATIVIDADE REALIZADA: AJUSTE REALIZADO",
+        "STATUS DO CHAMADO: CONCLUÍDO",
+    ]
+    extraido = extrator.extrair_campos(bloco)
+    c = classificar_bloco_padrao_rat(bloco, extraido, catalogo)
+    assert c["status"] == "CONHECIDO"
+    assert c["score"] >= (catalogo["limiar_similaridade"] * 100.0)
+
+
+def test_classificar_bloco_padrao_rat_desconhecido():
+    catalogo = carregar_catalogo_padroes_rats(criar_se_ausente=False)
+    bloco = [
+        "PROBLEMA IDENTIFICADO: SSD COM FALHA",
+        "OBS: CLIENTE SOLICITOU RETORNO",
+        "MODELO DO EQUIPAMENTO: DESKTOP DELL",
+    ]
+    extraido = extrator.extrair_campos(bloco)
+    c = classificar_bloco_padrao_rat(bloco, extraido, catalogo)
+    assert c["status"] == "DESCONHECIDO"
+
+
+def test_decisao_usuario_ignorar_bloco_desconhecido(tmp_path):
+    conteudo = textwrap.dedent(
+        """
+        TECNICO: ALAN GOMES
+        DATA: 19/03/2026
+        CLIENTE: CLIENTE TESTE
+        CHAMADO: 533576
+        KM INICIAL: 63507
+        KM FINAL: 63521
+        INICIO DA ATIVIDADE: 16:50
+        TÉRMINO DA ATIVIDADE: 17:15
+        ENDEREÇO: AV TESTE 100
+        ATIVIDADE REALIZADA: AJUSTE REALIZADO
+        STATUS DO CHAMADO: CONCLUÍDO
+        """
+    ).strip()
+    arq = tmp_path / "rat_ignorar.txt"
+    arq.write_text(conteudo, encoding="utf-8")
+
+    blocos = extrator.extrair_rats(extrator.ler_linhas(str(arq)))
+    h = extrator.hash_bloco_rat(blocos[0])
+    chave = extrator.chave_bloco_desconhecido(str(arq), h, 0)
+    decisoes_chave = {
+        chave: {
+            "decisao_usuario": "IGNORAR_BLOCO",
+            "campos_ajustados": {},
+        }
+    }
+    linhas = montar_linhas(
+        str(arq),
+        decisoes_blocos_por_chave=decisoes_chave,
+        decisoes_blocos_por_hash={},
+    )
+    assert linhas == []
+
+
+def test_decisao_usuario_ajustado_confirmado_aplica_campos(tmp_path):
+    conteudo = textwrap.dedent(
+        """
+        TECNICO: ALAN GOMES
+        DATA: 19/03/2026
+        CLIENTE: CLIENTE TESTE
+        CHAMADO: 533576
+        KM INICIAL: 63507
+        KM FINAL: 63521
+        INICIO DA ATIVIDADE: 16:50
+        TÉRMINO DA ATIVIDADE: 17:15
+        ENDEREÇO: AV TESTE 100
+        ATIVIDADE REALIZADA:
+        STATUS DO CHAMADO: CONCLUÍDO
+        """
+    ).strip()
+    arq = tmp_path / "rat_ajuste.txt"
+    arq.write_text(conteudo, encoding="utf-8")
+
+    blocos = extrator.extrair_rats(extrator.ler_linhas(str(arq)))
+    h = extrator.hash_bloco_rat(blocos[0])
+    chave = extrator.chave_bloco_desconhecido(str(arq), h, 0)
+    decisoes_chave = {
+        chave: {
+            "decisao_usuario": "AJUSTADO_CONFIRMADO",
+            "campos_ajustados": {
+                "ATIVIDADE REALIZADA": "AJUSTE MANUAL CONFIRMADO",
+                "CLIENTE": "CLIENTE AJUSTADO",
+            },
+        }
+    }
+    linhas = montar_linhas(
+        str(arq),
+        decisoes_blocos_por_chave=decisoes_chave,
+        decisoes_blocos_por_hash={},
+    )
+    linhas_chamado = [l for l in linhas if l.get("CHAMADO") == "533576"]
+    assert linhas_chamado
+    assert linhas_chamado[0]["ATIVIDADE REALIZADA"] == "AJUSTE MANUAL CONFIRMADO"
+    assert linhas_chamado[0]["CLIENTE"] == "CLIENTE AJUSTADO"
 

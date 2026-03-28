@@ -9,6 +9,7 @@ Resumo do fluxo:
 """
 
 import copy
+import hashlib
 import json
 import math
 import os
@@ -69,6 +70,9 @@ AUDITORIA_AJUSTES_PATH = os.path.join(os.path.dirname(__file__), "auditoria_ajus
 PERSISTENCIA_DIR = os.path.join(os.path.dirname(__file__), "persistencia")
 HISTORICO_RATS_PATH = os.path.join(PERSISTENCIA_DIR, "rats_historico.jsonl")
 HISTORICO_VALIDACOES_KM_PATH = os.path.join(PERSISTENCIA_DIR, "validacoes_km.jsonl")
+PADROES_RATS_PATH = os.path.join(PERSISTENCIA_DIR, "padroes_rats.json")
+RATS_DESCONHECIDAS_PATH = os.path.join(PERSISTENCIA_DIR, "rats_desconhecidas.jsonl")
+DECISOES_USUARIO_PATH = os.path.join(PERSISTENCIA_DIR, "decisoes_usuario.jsonl")
 ROTA_TIMEOUT_SEGUNDOS = 2
 ROTA_TENTATIVAS_HTTP = 1
 ROTA_BACKOFF_SEGUNDOS = 0.0
@@ -78,6 +82,61 @@ _CACHE_GEO = {}
 _CACHE_ROTA = {}
 _ROTA_TENTATIVAS = 0
 _SERVICO_ROTA_INDISPONIVEL = False
+
+DEFAULT_CATALOGO_PADROES_RATS = {
+    "versao": 1,
+    "limiar_similaridade": 0.55,
+    "min_rotulos_reconhecidos": 3,
+    "campos_chave_validacao": ["TÉCNICO", "DATA", "CLIENTE", "ATIVIDADE REALIZADA"],
+    "padroes": [
+        {
+            "id": "padrao_campos_rotulados_principal",
+            "nome": "PADRAO CAMPOS ROTULADOS",
+            "ativo": True,
+            "status": "VALIDADO",
+            "prioridade": 100,
+            "rotulos_referencia": [
+                "TÉCNICO",
+                "DATA",
+                "CLIENTE",
+                "CHAMADO",
+                "KM INICIAL",
+                "KM FINAL",
+                "PREVISAO CHEGADA",
+                "INICIO ATIVIDADE",
+                "TÉRMINO DA ATIVIDADE",
+                "ENDEREÇO CLIENTE",
+                "ATIVIDADE REALIZADA",
+                "STATUS ORIGINAL",
+                "QUEM ACOMPANHOU",
+            ],
+            "campos_obrigatorios": ["TÉCNICO", "DATA", "CLIENTE"],
+            "confirmacoes": 0,
+            "visto_total": 0,
+            "ultimo_match_em": "",
+        },
+        {
+            "id": "padrao_resumido_com_whatsapp_prefixo",
+            "nome": "PADRAO RESUMIDO COM PREFIXO",
+            "ativo": True,
+            "status": "VALIDADO",
+            "prioridade": 80,
+            "rotulos_referencia": [
+                "TÉCNICO",
+                "DATA",
+                "CLIENTE",
+                "CHAMADO",
+                "KM INICIAL",
+                "KM FINAL",
+                "ATIVIDADE REALIZADA",
+            ],
+            "campos_obrigatorios": ["TÉCNICO", "DATA"],
+            "confirmacoes": 0,
+            "visto_total": 0,
+            "ultimo_match_em": "",
+        },
+    ],
+}
 
 MUNICIPIOS_HINT_CLIENTE = [
     "sao paulo",
@@ -2369,6 +2428,322 @@ def rotulo_canonico(rotulo):
     return ""
 
 
+def _valor_bool_ativo(valor, padrao=True):
+    if isinstance(valor, bool):
+        return valor
+    if valor is None:
+        return padrao
+    txt = norm(valor)
+    if txt in {"0", "false", "falso", "nao", "não", "n", "off"}:
+        return False
+    if txt in {"1", "true", "verdadeiro", "sim", "s", "on"}:
+        return True
+    return padrao
+
+
+def _normalizar_rotulos_catalogo(lista):
+    saida = []
+    vistos = set()
+    if isinstance(lista, str):
+        lista = [lista]
+    if not isinstance(lista, list):
+        return saida
+    for item in lista:
+        canon = rotulo_canonico(item) or limpar(item).upper()
+        if not canon or canon in vistos:
+            continue
+        vistos.add(canon)
+        saida.append(canon)
+    return saida
+
+
+def _normalizar_catalogo_padroes_rats(catalogo):
+    base = copy.deepcopy(DEFAULT_CATALOGO_PADROES_RATS)
+    if not isinstance(catalogo, dict):
+        catalogo = {}
+
+    versao = catalogo.get("versao", base["versao"])
+    try:
+        versao = int(versao)
+    except (TypeError, ValueError):
+        versao = base["versao"]
+    base["versao"] = versao
+
+    limiar = catalogo.get("limiar_similaridade", base["limiar_similaridade"])
+    try:
+        limiar = float(limiar)
+    except (TypeError, ValueError):
+        limiar = base["limiar_similaridade"]
+    limiar = min(max(limiar, 0.0), 1.0)
+    base["limiar_similaridade"] = limiar
+
+    min_rotulos = catalogo.get("min_rotulos_reconhecidos", base["min_rotulos_reconhecidos"])
+    try:
+        min_rotulos = int(min_rotulos)
+    except (TypeError, ValueError):
+        min_rotulos = base["min_rotulos_reconhecidos"]
+    base["min_rotulos_reconhecidos"] = max(1, min_rotulos)
+
+    campos_chave = catalogo.get("campos_chave_validacao", base["campos_chave_validacao"])
+    campos_chave_norm = _normalizar_rotulos_catalogo(campos_chave)
+    if not campos_chave_norm:
+        campos_chave_norm = _normalizar_rotulos_catalogo(base["campos_chave_validacao"])
+    base["campos_chave_validacao"] = campos_chave_norm
+
+    padroes_in = catalogo.get("padroes", base["padroes"])
+    if not isinstance(padroes_in, list):
+        padroes_in = []
+
+    padroes_norm = []
+    for idx, padrao in enumerate(padroes_in):
+        if not isinstance(padrao, dict):
+            continue
+        padrao_id = limpar(padrao.get("id", f"padrao_{idx+1}")).lower().replace(" ", "_")
+        if not padrao_id:
+            padrao_id = f"padrao_{idx+1}"
+        nome = limpar(padrao.get("nome", padrao_id)).upper()
+        ativo = _valor_bool_ativo(padrao.get("ativo", True), True)
+        status = limpar(padrao.get("status", "VALIDADO")).upper() or "VALIDADO"
+        prioridade = padrao.get("prioridade", 0)
+        try:
+            prioridade = int(prioridade)
+        except (TypeError, ValueError):
+            prioridade = 0
+
+        rotulos_ref = _normalizar_rotulos_catalogo(padrao.get("rotulos_referencia", []))
+        campos_obrig = _normalizar_rotulos_catalogo(padrao.get("campos_obrigatorios", []))
+        if not rotulos_ref:
+            continue
+
+        confirmacoes = padrao.get("confirmacoes", 0)
+        try:
+            confirmacoes = int(confirmacoes)
+        except (TypeError, ValueError):
+            confirmacoes = 0
+
+        visto_total = padrao.get("visto_total", 0)
+        try:
+            visto_total = int(visto_total)
+        except (TypeError, ValueError):
+            visto_total = 0
+
+        padroes_norm.append(
+            {
+                "id": padrao_id,
+                "nome": nome,
+                "ativo": ativo,
+                "status": status,
+                "prioridade": prioridade,
+                "rotulos_referencia": rotulos_ref,
+                "campos_obrigatorios": campos_obrig,
+                "confirmacoes": max(0, confirmacoes),
+                "visto_total": max(0, visto_total),
+                "ultimo_match_em": limpar(padrao.get("ultimo_match_em", "")),
+            }
+        )
+
+    if not padroes_norm:
+        padroes_norm = copy.deepcopy(DEFAULT_CATALOGO_PADROES_RATS.get("padroes", []))
+        for p in padroes_norm:
+            p["rotulos_referencia"] = _normalizar_rotulos_catalogo(p.get("rotulos_referencia", []))
+            p["campos_obrigatorios"] = _normalizar_rotulos_catalogo(p.get("campos_obrigatorios", []))
+            p["ativo"] = _valor_bool_ativo(p.get("ativo", True), True)
+            p["status"] = limpar(p.get("status", "VALIDADO")).upper() or "VALIDADO"
+            p["prioridade"] = int(p.get("prioridade", 0) or 0)
+            p["confirmacoes"] = int(p.get("confirmacoes", 0) or 0)
+            p["visto_total"] = int(p.get("visto_total", 0) or 0)
+            p["ultimo_match_em"] = limpar(p.get("ultimo_match_em", ""))
+
+    base["padroes"] = padroes_norm
+    return base
+
+
+def carregar_catalogo_padroes_rats(criar_se_ausente=False):
+    catalogo = None
+    if os.path.exists(PADROES_RATS_PATH):
+        try:
+            with open(PADROES_RATS_PATH, encoding="utf-8") as f:
+                catalogo = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            catalogo = None
+    catalogo_norm = _normalizar_catalogo_padroes_rats(catalogo)
+    if criar_se_ausente and not os.path.exists(PADROES_RATS_PATH):
+        salvar_catalogo_padroes_rats(catalogo_norm)
+    return catalogo_norm
+
+
+def salvar_catalogo_padroes_rats(catalogo):
+    catalogo_norm = _normalizar_catalogo_padroes_rats(catalogo)
+    garantir_pasta_arquivo(PADROES_RATS_PATH)
+    with open(PADROES_RATS_PATH, "w", encoding="utf-8") as f:
+        json.dump(catalogo_norm, f, ensure_ascii=False, indent=2)
+    return catalogo_norm
+
+
+def extrair_rotulos_canonicos_bloco(bloco):
+    rotulos = []
+    vistos = set()
+    for linha in bloco:
+        linha_limpa = limpar_linha(linha)
+        if not linha_limpa:
+            continue
+        rotulo, _ = dividir_rotulo_valor(linha_limpa)
+        canon = rotulo_canonico(rotulo)
+        if canon and canon not in vistos:
+            vistos.add(canon)
+            rotulos.append(canon)
+    return rotulos
+
+
+def hash_bloco_rat(bloco):
+    linhas = [limpar_linha(l) for l in bloco]
+    linhas = [l for l in linhas if l]
+    base = "\n".join(linhas)
+    return hashlib.sha1(base.encode("utf-8", errors="ignore")).hexdigest()
+
+
+def score_similaridade_rotulos(rotulos_bloco, rotulos_padrao):
+    a = set(rotulos_bloco or [])
+    b = set(rotulos_padrao or [])
+    if not a or not b:
+        return 0.0
+    inter = len(a & b)
+    uniao = len(a | b)
+    jaccard = inter / uniao if uniao else 0.0
+    cobertura_bloco = inter / len(a) if a else 0.0
+    return (0.6 * jaccard) + (0.4 * cobertura_bloco)
+
+
+def classificar_bloco_padrao_rat(bloco, campos_extraidos, catalogo):
+    catalogo_norm = _normalizar_catalogo_padroes_rats(catalogo)
+    rotulos_bloco = extrair_rotulos_canonicos_bloco(bloco)
+    min_rotulos = int(catalogo_norm.get("min_rotulos_reconhecidos", 3) or 3)
+    campos_chave = catalogo_norm.get("campos_chave_validacao", [])
+    campos_chave_preenchidos = [
+        c for c in campos_chave if limpar(campos_extraidos.get(c, ""))
+    ]
+    estrutura_minima = len(rotulos_bloco) >= min_rotulos or len(campos_chave_preenchidos) >= 2
+    if not estrutura_minima:
+        return {
+            "status": "SEM_ESTRUTURA",
+            "padrao_id": "",
+            "padrao_nome": "",
+            "score": 0.0,
+            "limiar": float(catalogo_norm.get("limiar_similaridade", 0.55)),
+            "rotulos_bloco": rotulos_bloco,
+            "campos_chave_preenchidos": campos_chave_preenchidos,
+            "motivo": "BLOCO_COM_POUCOS_ROTULOS_RECONHECIDOS",
+        }
+
+    melhor = None
+    for padrao in catalogo_norm.get("padroes", []):
+        if not _valor_bool_ativo(padrao.get("ativo", True), True):
+            continue
+        rotulos_ref = padrao.get("rotulos_referencia", [])
+        if not rotulos_ref:
+            continue
+        sim = score_similaridade_rotulos(rotulos_bloco, rotulos_ref)
+        obrigatorios = set(padrao.get("campos_obrigatorios", []))
+        universo_bloco = set(rotulos_bloco) | set(campos_chave_preenchidos)
+        taxa_obrig = (
+            len(obrigatorios & universo_bloco) / len(obrigatorios)
+            if obrigatorios
+            else 1.0
+        )
+        score = ((sim * 0.75) + (taxa_obrig * 0.25)) * 100.0
+        prioridade = int(padrao.get("prioridade", 0) or 0)
+        score += (prioridade * 0.001)
+        candidato = {
+            "status": "CONHECIDO",
+            "padrao_id": limpar(padrao.get("id", "")),
+            "padrao_nome": limpar(padrao.get("nome", "")),
+            "score": round(score, 2),
+            "limiar": float(catalogo_norm.get("limiar_similaridade", 0.55)),
+            "rotulos_bloco": rotulos_bloco,
+            "campos_chave_preenchidos": campos_chave_preenchidos,
+            "motivo": "",
+            "_ref": padrao,
+        }
+        if melhor is None or candidato["score"] > melhor["score"]:
+            melhor = candidato
+
+    limiar_score = float(catalogo_norm.get("limiar_similaridade", 0.55)) * 100.0
+    if not melhor:
+        return {
+            "status": "DESCONHECIDO",
+            "padrao_id": "",
+            "padrao_nome": "",
+            "score": 0.0,
+            "limiar": float(catalogo_norm.get("limiar_similaridade", 0.55)),
+            "rotulos_bloco": rotulos_bloco,
+            "campos_chave_preenchidos": campos_chave_preenchidos,
+            "motivo": "CATALOGO_SEM_PADROES_ATIVOS",
+        }
+    if melhor["score"] < limiar_score:
+        melhor["status"] = "DESCONHECIDO"
+        melhor["motivo"] = (
+            f"SCORE_INFERIOR_AO_LIMIAR ({melhor['score']:.2f} < {limiar_score:.2f})"
+        )
+    return melhor
+
+
+def atualizar_estatisticas_catalogo_padroes(catalogo, classificacao):
+    if not isinstance(catalogo, dict):
+        return
+    if not isinstance(classificacao, dict):
+        return
+    if limpar(classificacao.get("status", "")) != "CONHECIDO":
+        return
+    padrao_id = limpar(classificacao.get("padrao_id", ""))
+    if not padrao_id:
+        return
+    for padrao in catalogo.get("padroes", []):
+        if limpar(padrao.get("id", "")) != padrao_id:
+            continue
+        visto_total = padrao.get("visto_total", 0)
+        try:
+            visto_total = int(visto_total)
+        except (TypeError, ValueError):
+            visto_total = 0
+        padrao["visto_total"] = max(0, visto_total) + 1
+        padrao["ultimo_match_em"] = datetime.now(ZoneInfo(TIMEZONE_PADRAO)).isoformat()
+        break
+
+
+def montar_evento_padrao_bloco(
+    bloco,
+    classificacao,
+    extraido,
+    *,
+    arquivo_origem,
+    indice_bloco,
+    entrou_processamento,
+):
+    linhas = [limpar_linha(l) for l in bloco]
+    linhas = [l for l in linhas if l]
+    preview = " | ".join(linhas[:6])
+    return {
+        "arquivo_origem": arquivo_origem,
+        "indice_bloco": int(indice_bloco),
+        "hash_bloco": hash_bloco_rat(bloco),
+        "classificacao_status": limpar(classificacao.get("status", "")),
+        "padrao_id": limpar(classificacao.get("padrao_id", "")),
+        "padrao_nome": limpar(classificacao.get("padrao_nome", "")),
+        "score": float(classificacao.get("score", 0.0) or 0.0),
+        "limiar": float(classificacao.get("limiar", 0.0) or 0.0),
+        "motivo": limpar(classificacao.get("motivo", "")),
+        "rotulos_bloco": list(classificacao.get("rotulos_bloco", [])),
+        "campos_chave_preenchidos": list(classificacao.get("campos_chave_preenchidos", [])),
+        "tecnico_extraido": limpar(extraido.get("TÉCNICO", "")),
+        "data_extraida": limpar(extraido.get("DATA", "")),
+        "chamado_extraido": limpar(extraido.get("CHAMADO", "")),
+        "cliente_extraido": limpar(extraido.get("CLIENTE", "")),
+        "atividade_realizada_extraida": limpar(extraido.get("ATIVIDADE REALIZADA", "")),
+        "entrou_processamento": bool(entrou_processamento),
+        "bloco_preview": preview,
+    }
+
+
 def extrair_campos(bloco):
     cabecalhos_soltos_invalidos = {
         "inicio",
@@ -2606,8 +2981,11 @@ def extrair_created_at_prefixo(bloco):
 # BLOCO H: PARSE DO RAT E REGRAS DE NEGOCIO POR REGISTRO
 # -------------------------
 # Monta o registro final, normaliza status/descricao e aplica defaults.
-def parse_rat(bloco, tecnicos_regras=None):
-    extraido = aplicar_compatibilidade_chaves(extrair_campos(bloco))
+def parse_rat(bloco, tecnicos_regras=None, extraido_campos=None):
+    if isinstance(extraido_campos, dict):
+        extraido = aplicar_compatibilidade_chaves(dict(extraido_campos))
+    else:
+        extraido = aplicar_compatibilidade_chaves(extrair_campos(bloco))
     d = {k: "" for k in CAMPOS}
 
     d["TÉCNICO"] = extraido.get("TÉCNICO", "")
@@ -3535,16 +3913,92 @@ def ler_linhas(arq):
 # BLOCO J: PROCESSAMENTO DE ARQUIVO TXT
 # -------------------------
 # Expande chamados, aplica regras sequenciais e filtro por intervalo de datas.
-def montar_linhas(arq, data_inicio=None, data_fim=None, tecnicos_regras=None):
+def montar_linhas(
+    arq,
+    data_inicio=None,
+    data_fim=None,
+    tecnicos_regras=None,
+    catalogo_padroes=None,
+    eventos_padroes=None,
+    decisoes_blocos_por_chave=None,
+    decisoes_blocos_por_hash=None,
+):
     linhas = ler_linhas(arq)
     rats = extrair_rats(linhas)
     resultado = []
+    catalogo_local = (
+        _normalizar_catalogo_padroes_rats(catalogo_padroes)
+        if isinstance(catalogo_padroes, dict)
+        else carregar_catalogo_padroes_rats(criar_se_ausente=False)
+    )
 
-    for bloco in rats:
-        d = parse_rat(bloco, tecnicos_regras=tecnicos_regras)
+    for idx_bloco, bloco in enumerate(rats):
+        bloco_hash = hash_bloco_rat(bloco)
+        chave_bloco = chave_bloco_desconhecido(arq, bloco_hash, idx_bloco)
+        evento_decisao = None
+        if isinstance(decisoes_blocos_por_chave, dict):
+            evento_decisao = decisoes_blocos_por_chave.get(chave_bloco)
+        if evento_decisao is None and isinstance(decisoes_blocos_por_hash, dict):
+            evento_decisao = decisoes_blocos_por_hash.get(bloco_hash)
+        decisao_usuario = limpar((evento_decisao or {}).get("decisao_usuario", "")).upper()
+        if decisao_usuario == "IGNORAR_BLOCO":
+            if eventos_padroes is not None:
+                eventos_padroes.append(
+                    {
+                        "arquivo_origem": arq,
+                        "indice_bloco": idx_bloco,
+                        "hash_bloco": bloco_hash,
+                        "classificacao_status": "DESCONHECIDO",
+                        "padrao_id": "",
+                        "padrao_nome": "",
+                        "score": 0.0,
+                        "limiar": 0.0,
+                        "motivo": "IGNORADO_POR_DECISAO_USUARIO",
+                        "rotulos_bloco": extrair_rotulos_canonicos_bloco(bloco),
+                        "campos_chave_preenchidos": [],
+                        "tecnico_extraido": "",
+                        "data_extraida": "",
+                        "chamado_extraido": "",
+                        "cliente_extraido": "",
+                        "atividade_realizada_extraida": "",
+                        "entrou_processamento": False,
+                        "bloco_preview": " | ".join([limpar_linha(l) for l in bloco if limpar_linha(l)][:6]),
+                    }
+                )
+            continue
+
+        extraido_bloco = aplicar_compatibilidade_chaves(extrair_campos(bloco))
+        classificacao_padrao = classificar_bloco_padrao_rat(bloco, extraido_bloco, catalogo_local)
+        atualizar_estatisticas_catalogo_padroes(catalogo_local, classificacao_padrao)
+        d = parse_rat(bloco, tecnicos_regras=tecnicos_regras, extraido_campos=extraido_bloco)
+
+        ajustes_manuais = normalizar_campos_ajuste_manual((evento_decisao or {}).get("campos_ajustados", {}))
+        ajustes_aplicados = []
+        if ajustes_manuais:
+            for campo, valor_novo in ajustes_manuais.items():
+                if campo not in d:
+                    continue
+                valor_ant = limpar(d.get(campo, ""))
+                if limpar(valor_novo) == valor_ant:
+                    continue
+                d[campo] = valor_novo
+                ajustes_aplicados.append((campo, valor_ant, valor_novo))
+
+        entrou_processamento = bool(limpar(d.get("ATIVIDADE REALIZADA", "")))
+        if eventos_padroes is not None:
+            eventos_padroes.append(
+                montar_evento_padrao_bloco(
+                    bloco,
+                    classificacao_padrao,
+                    d,
+                    arquivo_origem=arq,
+                    indice_bloco=idx_bloco,
+                    entrou_processamento=entrou_processamento,
+                )
+            )
 
         # Regra: RAT sem atividade realizada não entra no processamento.
-        if not limpar(d.get("ATIVIDADE REALIZADA", "")):
+        if not entrou_processamento:
             continue
 
         chamados = extrair_chamados(d["CHAMADO"])
@@ -3557,6 +4011,40 @@ def montar_linhas(arq, data_inicio=None, data_fim=None, tecnicos_regras=None):
             linha["_ARQUIVO_ORIGEM"] = arq
             linha["_LOGS"] = []
             linha["_TEM_INCONSISTENCIA"] = False
+            linha["_PADRAO_RAT_STATUS"] = limpar(classificacao_padrao.get("status", ""))
+            linha["_PADRAO_RAT_ID"] = limpar(classificacao_padrao.get("padrao_id", ""))
+            linha["_PADRAO_RAT_SCORE"] = str(classificacao_padrao.get("score", ""))
+            linha["_PADRAO_RAT_MOTIVO"] = limpar(classificacao_padrao.get("motivo", ""))
+            linha["_BLOCO_HASH"] = bloco_hash
+            if linha["_PADRAO_RAT_STATUS"] == "DESCONHECIDO":
+                linha["_TEM_INCONSISTENCIA"] = True
+                registrar_alteracao_linha(
+                    linha,
+                    "PADRAO RAT",
+                    "CLASSIFICACAO PADRAO RAT",
+                    "",
+                    (
+                        f"DESCONHECIDO | SCORE={linha['_PADRAO_RAT_SCORE']} | "
+                        f"MOTIVO={linha['_PADRAO_RAT_MOTIVO']} | "
+                        f"PADRAO_SUGERIDO={linha['_PADRAO_RAT_ID'] or 'NENHUM'}"
+                    ),
+                )
+            if decisao_usuario:
+                registrar_alteracao_linha(
+                    linha,
+                    "DECISAO BLOCO DESCONHECIDO",
+                    "DECISAO USUARIO",
+                    "",
+                    decisao_usuario,
+                )
+            for campo_ajuste, valor_ant, valor_novo in ajustes_aplicados:
+                registrar_alteracao_linha(
+                    linha,
+                    "AJUSTE MANUAL BLOCO",
+                    campo_ajuste,
+                    valor_ant,
+                    valor_novo,
+                )
             tecnico_original = linha.get("TÉCNICO", "")
             regra_origem = regra_tecnico(tecnico_original, tecnicos_regras=tecnicos_regras)
             tecnico_mapeado = mapear_tecnico_saida(tecnico_original, tecnicos_regras=tecnicos_regras)
@@ -3745,7 +4233,12 @@ def montar_linhas(arq, data_inicio=None, data_fim=None, tecnicos_regras=None):
             filtradas.append(r)
         linhas_base = filtradas
 
-    return [forcar_maiusculas(r) for r in linhas_base]
+    linhas_final = [forcar_maiusculas(r) for r in linhas_base]
+    if isinstance(catalogo_padroes, dict):
+        # devolve estatísticas atualizadas para quem chamou com catálogo compartilhado.
+        catalogo_padroes.clear()
+        catalogo_padroes.update(catalogo_local)
+    return linhas_final
 
 
 def linha_para_exportacao(linha):
@@ -3782,6 +4275,135 @@ def append_jsonl(path, linhas):
             f.write(json.dumps(item, ensure_ascii=False) + "\n")
             qtd += 1
     return qtd
+
+
+def ler_jsonl(path):
+    itens = []
+    if not os.path.exists(path):
+        return itens
+    try:
+        with open(path, encoding="utf-8") as f:
+            for linha in f:
+                txt = (linha or "").strip()
+                if not txt:
+                    continue
+                try:
+                    itens.append(json.loads(txt))
+                except json.JSONDecodeError:
+                    continue
+    except OSError:
+        return []
+    return itens
+
+
+def chave_bloco_desconhecido(arquivo_origem, hash_bloco, indice_bloco):
+    arq = limpar(arquivo_origem)
+    h = limpar(hash_bloco)
+    try:
+        idx = int(indice_bloco)
+    except (TypeError, ValueError):
+        idx = -1
+    return f"{arq}|{h}|{idx}"
+
+
+def normalizar_campos_ajuste_manual(campos):
+    if not isinstance(campos, dict):
+        return {}
+    campos_norm = aplicar_compatibilidade_chaves(dict(campos))
+    saida = {}
+    for campo in CAMPOS:
+        if campo not in campos_norm:
+            continue
+        valor = limpar(campos_norm.get(campo, ""))
+        if campo == "DATA":
+            valor = converter_data(valor)
+        elif campo in {"KM INICIAL", "KM FINAL"}:
+            valor = normalizar_campo_km(valor)
+        elif campo in {"INICIO DA ATIVIDADE", "TÉRMINO DA ATIVIDADE"}:
+            valor = normalizar_hora(valor)
+        saida[campo] = valor
+    return saida
+
+
+def carregar_decisoes_blocos_desconhecidos():
+    eventos = ler_jsonl(DECISOES_USUARIO_PATH)
+    por_chave = {}
+    por_hash = {}
+    for ev in eventos:
+        if not isinstance(ev, dict):
+            continue
+        chave = chave_bloco_desconhecido(
+            ev.get("arquivo_origem", ""),
+            ev.get("hash_bloco", ""),
+            ev.get("indice_bloco", -1),
+        )
+        h = limpar(ev.get("hash_bloco", ""))
+        if not h:
+            continue
+        atual = por_chave.get(chave)
+        # Mantem o último evento por chave com base na ordem de leitura e timestamp.
+        if atual is None or str(ev.get("decidido_em", "")) >= str(atual.get("decidido_em", "")):
+            ev_norm = dict(ev)
+            ev_norm["decisao_usuario"] = limpar(ev_norm.get("decisao_usuario", "")).upper()
+            ev_norm["campos_ajustados"] = normalizar_campos_ajuste_manual(
+                ev_norm.get("campos_ajustados", {})
+            )
+            por_chave[chave] = ev_norm
+        atual_hash = por_hash.get(h)
+        if atual_hash is None or str(ev.get("decidido_em", "")) >= str(atual_hash.get("decidido_em", "")):
+            ev_hash = dict(ev)
+            ev_hash["decisao_usuario"] = limpar(ev_hash.get("decisao_usuario", "")).upper()
+            ev_hash["campos_ajustados"] = normalizar_campos_ajuste_manual(
+                ev_hash.get("campos_ajustados", {})
+            )
+            por_hash[h] = ev_hash
+    return por_chave, por_hash
+
+
+def persistir_blocos_desconhecidos(eventos_padroes, arquivo_saida, execution_id):
+    if not eventos_padroes:
+        return 0
+    agora = datetime.now(ZoneInfo(TIMEZONE_PADRAO)).isoformat()
+    eventos = []
+    chaves_vistas = set()
+    for ev in eventos_padroes:
+        if limpar(ev.get("classificacao_status", "")) != "DESCONHECIDO":
+            continue
+        chave = (
+            limpar(ev.get("arquivo_origem", "")),
+            limpar(ev.get("hash_bloco", "")),
+            str(ev.get("indice_bloco", "")),
+        )
+        if chave in chaves_vistas:
+            continue
+        chaves_vistas.add(chave)
+        eventos.append(
+            {
+                "execution_id": execution_id,
+                "processed_at": agora,
+                "arquivo_saida": arquivo_saida,
+                "arquivo_origem": limpar(ev.get("arquivo_origem", "")),
+                "indice_bloco": int(ev.get("indice_bloco", 0) or 0),
+                "hash_bloco": limpar(ev.get("hash_bloco", "")),
+                "classificacao_status": limpar(ev.get("classificacao_status", "")),
+                "padrao_sugerido_id": limpar(ev.get("padrao_id", "")),
+                "padrao_sugerido_nome": limpar(ev.get("padrao_nome", "")),
+                "score": float(ev.get("score", 0.0) or 0.0),
+                "limiar": float(ev.get("limiar", 0.0) or 0.0),
+                "motivo": limpar(ev.get("motivo", "")),
+                "rotulos_bloco": list(ev.get("rotulos_bloco", [])),
+                "campos_chave_preenchidos": list(ev.get("campos_chave_preenchidos", [])),
+                "tecnico_extraido": limpar(ev.get("tecnico_extraido", "")),
+                "data_extraida": limpar(ev.get("data_extraida", "")),
+                "chamado_extraido": limpar(ev.get("chamado_extraido", "")),
+                "cliente_extraido": limpar(ev.get("cliente_extraido", "")),
+                "atividade_realizada_extraida": limpar(ev.get("atividade_realizada_extraida", "")),
+                "entrou_processamento": bool(ev.get("entrou_processamento", False)),
+                "bloco_preview": limpar(ev.get("bloco_preview", "")),
+                "decisao_usuario": "PENDENTE_CLASSIFICACAO_MANUAL",
+            }
+        )
+    return append_jsonl(RATS_DESCONHECIDAS_PATH, eventos)
 
 
 def persistir_historico_execucao(registros, arquivo_saida, execution_id):
@@ -3915,6 +4537,9 @@ def gerar_excel(
         somente_inconsistencias = bool(somente_inconsistencias)
 
     tecnicos_regras_ativos = montar_tecnicos_regras_ativas(regras_tecnicos_extra)
+    catalogo_padroes = carregar_catalogo_padroes_rats(criar_se_ausente=True)
+    decisoes_blocos_por_chave, decisoes_blocos_por_hash = carregar_decisoes_blocos_desconhecidos()
+    eventos_padroes = []
     execution_id = datetime.now(ZoneInfo(TIMEZONE_PADRAO)).strftime("%Y%m%d%H%M%S%f")
     data_inicio_dt = normalizar_data_filtro(data_inicio, "Data inicial")
     data_fim_dt = normalizar_data_filtro(data_fim, "Data final")
@@ -3927,7 +4552,18 @@ def gerar_excel(
 
     todas = []
     for arq in arquivos:
-        todas.extend(montar_linhas(arq, data_inicio_dt, data_fim_dt, tecnicos_regras=tecnicos_regras_ativos))
+        todas.extend(
+            montar_linhas(
+                arq,
+                data_inicio_dt,
+                data_fim_dt,
+                tecnicos_regras=tecnicos_regras_ativos,
+                catalogo_padroes=catalogo_padroes,
+                eventos_padroes=eventos_padroes,
+                decisoes_blocos_por_chave=decisoes_blocos_por_chave,
+                decisoes_blocos_por_hash=decisoes_blocos_por_hash,
+            )
+        )
 
     registros_por_chave = {}
     ordem_chaves = []
@@ -4007,6 +4643,12 @@ def gerar_excel(
         arquivo_saida=saida,
         execution_id=execution_id,
     )
+    salvar_catalogo_padroes_rats(catalogo_padroes)
+    qtd_blocos_desconhecidos = persistir_blocos_desconhecidos(
+        eventos_padroes,
+        arquivo_saida=saida,
+        execution_id=execution_id,
+    )
     qtd_auditoria = persistir_auditoria_ajustes(
         registros_unicos,
         arquivo_saida=saida,
@@ -4016,7 +4658,8 @@ def gerar_excel(
     qtd_duplicados = len(todas) - len(registros_unicos)
     print(
         f"{len(df)} registros gerados com sucesso! "
-        f"({qtd_duplicados} duplicados removidos; {len(registros_filtrados)} apos filtros)"
+        f"({qtd_duplicados} duplicados removidos; {len(registros_filtrados)} apos filtros; "
+        f"{qtd_blocos_desconhecidos} blocos desconhecidos registrados)"
     )
     return {
         "registros_gerados": len(df),
@@ -4029,6 +4672,7 @@ def gerar_excel(
         "execution_id": execution_id,
         "historico_rats_persistidos": qtd_hist_rats,
         "historico_validacoes_km_persistidos": qtd_hist_validacoes,
+        "blocos_desconhecidos_persistidos": qtd_blocos_desconhecidos,
         "auditoria_ajustes_persistidos": qtd_auditoria,
     }
 

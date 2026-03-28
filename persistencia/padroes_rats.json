@@ -1,0 +1,66 @@
+{
+  "versao": 1,
+  "limiar_similaridade": 0.55,
+  "min_rotulos_reconhecidos": 3,
+  "campos_chave_validacao": [
+    "T?CNICO",
+    "DATA",
+    "CLIENTE",
+    "ATIVIDADE REALIZADA"
+  ],
+  "padroes": [
+    {
+      "id": "padrao_campos_rotulados_principal",
+      "nome": "PADRAO CAMPOS ROTULADOS",
+      "ativo": true,
+      "status": "VALIDADO",
+      "prioridade": 100,
+      "rotulos_referencia": [
+        "T?CNICO",
+        "DATA",
+        "CLIENTE",
+        "CHAMADO",
+        "KM INICIAL",
+        "KM FINAL",
+        "PREVISAO CHEGADA",
+        "INICIO ATIVIDADE",
+        "T?RMINO DA ATIVIDADE",
+        "ENDERE?O CLIENTE",
+        "ATIVIDADE REALIZADA",
+        "STATUS ORIGINAL",
+        "QUEM ACOMPANHOU"
+      ],
+      "campos_obrigatorios": [
+        "T?CNICO",
+        "DATA",
+        "CLIENTE"
+      ],
+      "confirmacoes": 0,
+      "visto_total": 0,
+      "ultimo_match_em": ""
+    },
+    {
+      "id": "padrao_resumido_com_whatsapp_prefixo",
+      "nome": "PADRAO RESUMIDO COM PREFIXO",
+      "ativo": true,
+      "status": "VALIDADO",
+      "prioridade": 80,
+      "rotulos_referencia": [
+        "T?CNICO",
+        "DATA",
+        "CLIENTE",
+        "CHAMADO",
+        "KM INICIAL",
+        "KM FINAL",
+        "ATIVIDADE REALIZADA"
+      ],
+      "campos_obrigatorios": [
+        "T?CNICO",
+        "DATA"
+      ],
+      "confirmacoes": 0,
+      "visto_total": 0,
+      "ultimo_match_em": ""
+    }
+  ]
+}
