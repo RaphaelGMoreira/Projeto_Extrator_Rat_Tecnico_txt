@@ -88,6 +88,33 @@ def _formatar_duracao_hms(segundos):
     segundos_rest = total % 60
     return f"{horas:02d}:{minutos:02d}:{segundos_rest:02d}"
 
+
+def _ler_jsonl(path):
+    itens = []
+    if not os.path.isfile(path):
+        return itens
+    try:
+        with open(path, encoding="utf-8") as f:
+            for linha in f:
+                txt = (linha or "").strip()
+                if not txt:
+                    continue
+                try:
+                    itens.append(json.loads(txt))
+                except json.JSONDecodeError:
+                    continue
+    except OSError:
+        return []
+    return itens
+
+
+def _usuario_local():
+    for key in ("USERNAME", "USER", "LOGNAME"):
+        v = os.environ.get(key)
+        if v:
+            return str(v)
+    return "USUARIO_LOCAL"
+
 # ==========================
 # BLOCO 3: MODO GUI
 # ==========================
@@ -120,6 +147,19 @@ if GUI_DISPONIVEL:
             self.arquivo_tecnicos_base = os.path.join(
                 os.path.dirname(__file__), "regras", "tecnicos_regras.json"
             )
+            self.pasta_persistencia = os.path.join(os.path.dirname(__file__), "persistencia")
+            self.arquivo_rats_desconhecidas = os.path.join(
+                self.pasta_persistencia, "rats_desconhecidas.jsonl"
+            )
+            self.arquivo_decisoes_usuario = os.path.join(
+                self.pasta_persistencia, "decisoes_usuario.jsonl"
+            )
+            self.blocos_desconhecidos = []
+            self.indices_blocos_desconhecidos_visiveis = []
+            self.filtro_blocos_desconhecidos_var = tk.StringVar()
+            self.resumo_blocos_desconhecidos_var = tk.StringVar(
+                value="BLOCOS DESCONHECIDOS: 0 | PENDENTES: 0"
+            )
             self.avancado_aberto = True
             self.avancado_titulo_var = tk.StringVar(value="Campo Avancado [-]")
             self.resumo_tecnicos_var = tk.StringVar(value="Tecnicos na sessao: 0")
@@ -127,6 +167,7 @@ if GUI_DISPONIVEL:
             self.frame_avancado = None
             self.lista_tecnicos_sessao = None
             self.lista_tecnicos_base = None
+            self.lista_blocos_desconhecidos = None
             self.progress = None
             self.notebook = None
             self.log_text = None
@@ -139,6 +180,7 @@ if GUI_DISPONIVEL:
             self.build_ui()
             self.atualizar_lista_tecnicos_sessao()
             self.carregar_tecnicos_base()
+            self.carregar_blocos_desconhecidos()
             self.atualizar_resumo_execucao()
 
         def build_ui(self):
@@ -402,6 +444,81 @@ if GUI_DISPONIVEL:
                 bg="#f7f7f7",
             ).pack(anchor="w", padx=10, pady=(0, 8))
 
+            ttk.Separator(self.frame_avancado, orient="horizontal").pack(fill="x", padx=10, pady=(0, 8))
+
+            tk.Label(
+                self.frame_avancado,
+                text="REVISÃO DE BLOCOS DESCONHECIDOS (MODO APRENDIZADO).",
+                bg="#f7f7f7",
+                font=("Segoe UI", 9, "bold"),
+            ).pack(anchor="w", padx=10, pady=(0, 4))
+
+            frame_filtro_desconhecidos = tk.Frame(self.frame_avancado, bg="#f7f7f7")
+            frame_filtro_desconhecidos.pack(fill="x", padx=10, pady=(0, 2))
+            tk.Label(
+                frame_filtro_desconhecidos,
+                text="BUSCAR BLOCO:",
+                bg="#f7f7f7",
+            ).pack(side="left")
+            ent_filtro_desconhecidos = ttk.Entry(
+                frame_filtro_desconhecidos,
+                textvariable=self.filtro_blocos_desconhecidos_var,
+                width=36,
+            )
+            ent_filtro_desconhecidos.pack(side="left", padx=6)
+            ent_filtro_desconhecidos.bind("<KeyRelease>", lambda _e: self.atualizar_lista_blocos_desconhecidos())
+            ttk.Button(
+                frame_filtro_desconhecidos,
+                text="LIMPAR BUSCA",
+                command=self.limpar_filtro_blocos_desconhecidos,
+            ).pack(side="left")
+
+            self.lista_blocos_desconhecidos = tk.Listbox(
+                self.frame_avancado,
+                height=7,
+                selectmode=tk.SINGLE,
+            )
+            self.lista_blocos_desconhecidos.pack(fill="x", padx=10, pady=4)
+
+            frame_botoes_desconhecidos = tk.Frame(self.frame_avancado, bg="#f7f7f7")
+            frame_botoes_desconhecidos.pack(fill="x", padx=10, pady=(2, 6))
+            ttk.Button(
+                frame_botoes_desconhecidos,
+                text="ATUALIZAR BLOCO",
+                command=self.carregar_blocos_desconhecidos,
+            ).pack(side="left")
+            ttk.Button(
+                frame_botoes_desconhecidos,
+                text="VER DETALHES",
+                command=self.ver_bloco_desconhecido,
+            ).pack(side="left", padx=6)
+            ttk.Button(
+                frame_botoes_desconhecidos,
+                text="AJUSTAR E CONFIRMAR",
+                command=self.ajustar_confirmar_bloco_desconhecido,
+            ).pack(side="left")
+            ttk.Button(
+                frame_botoes_desconhecidos,
+                text="CONFIRMAR VÁLIDO",
+                command=self.confirmar_bloco_desconhecido,
+            ).pack(side="left", padx=6)
+            ttk.Button(
+                frame_botoes_desconhecidos,
+                text="IGNORAR BLOCO",
+                command=self.ignorar_bloco_desconhecido,
+            ).pack(side="left")
+            ttk.Button(
+                frame_botoes_desconhecidos,
+                text="VOLTAR PARA PENDENTE",
+                command=self.reabrir_bloco_desconhecido,
+            ).pack(side="left")
+
+            tk.Label(
+                self.frame_avancado,
+                textvariable=self.resumo_blocos_desconhecidos_var,
+                bg="#f7f7f7",
+            ).pack(anchor="w", padx=10, pady=(0, 8))
+
             # =====================
             # ABA 3: RESULTADO / LOG
             # =====================
@@ -502,6 +619,7 @@ if GUI_DISPONIVEL:
                 f"Duplicados removidos: {resumo.get('duplicados_removidos', '-')}\n"
                 f"Registros após filtros: {resumo.get('registros_apos_filtros', '-')}\n"
                 f"Logs gerados: {resumo.get('logs_gerados', '-')}\n"
+                f"Blocos desconhecidos: {resumo.get('blocos_desconhecidos_persistidos', '-')}\n"
                 f"Arquivo de saída: {resumo.get('arquivo_saida', self.saida_var.get().strip())}"
             )
             self.resultado_resumo_var.set(texto)
@@ -1173,6 +1291,328 @@ if GUI_DISPONIVEL:
             ttk.Button(frame_btn, text="TORNAR VISIVEL", command=tornar_visivel).pack(side="left")
             ttk.Button(frame_btn, text="Fechar", command=modal.destroy).pack(side="left", padx=8)
 
+        def _chave_bloco_desconhecido(self, item):
+            if not isinstance(item, dict):
+                return ""
+            arquivo = item.get("arquivo_origem", "") or item.get("ARQUIVO ORIGEM", "")
+            h = item.get("hash_bloco", "") or item.get("HASH BLOCO", "")
+            idx = item.get("indice_bloco", item.get("INDICE BLOCO", ""))
+            return f"{arquivo}|{h}|{idx}"
+
+        def limpar_filtro_blocos_desconhecidos(self):
+            self.filtro_blocos_desconhecidos_var.set("")
+            self.atualizar_lista_blocos_desconhecidos()
+
+        def carregar_blocos_desconhecidos(self):
+            eventos = _ler_jsonl(self.arquivo_rats_desconhecidas)
+            decisoes = _ler_jsonl(self.arquivo_decisoes_usuario)
+
+            # Mapa de última decisão por bloco.
+            decisao_por_chave = {}
+            for d in decisoes:
+                chave = self._chave_bloco_desconhecido(d)
+                if not chave:
+                    continue
+                atual = decisao_por_chave.get(chave)
+                if atual is None or str(d.get("decidido_em", "")) >= str(atual.get("decidido_em", "")):
+                    decisao_por_chave[chave] = d
+
+            # Mapa de último evento desconhecido por bloco.
+            ultimo_evento = {}
+            for ev in eventos:
+                chave = self._chave_bloco_desconhecido(ev)
+                if not chave:
+                    continue
+                atual = ultimo_evento.get(chave)
+                if atual is None or str(ev.get("processed_at", "")) >= str(atual.get("processed_at", "")):
+                    ultimo_evento[chave] = ev
+
+            blocos = []
+            for chave, ev in ultimo_evento.items():
+                dec = decisao_por_chave.get(chave, {})
+                status_decisao = (
+                    str(dec.get("decisao_usuario", "")).strip().upper()
+                    or str(ev.get("decisao_usuario", "")).strip().upper()
+                    or "PENDENTE_CLASSIFICACAO_MANUAL"
+                )
+                item = dict(ev)
+                item["_CHAVE_BLOCO"] = chave
+                item["_STATUS_DECISAO"] = status_decisao
+                item["_DECIDIDO_POR"] = str(dec.get("decidido_por", "")).strip()
+                item["_DECIDIDO_EM"] = str(dec.get("decidido_em", "")).strip()
+                blocos.append(item)
+
+            blocos.sort(
+                key=lambda x: (
+                    str(x.get("processed_at", "")),
+                    str(x.get("arquivo_origem", "")),
+                    int(x.get("indice_bloco", 0) or 0),
+                ),
+                reverse=True,
+            )
+            self.blocos_desconhecidos = blocos
+            self.atualizar_lista_blocos_desconhecidos()
+            self.registrar_log_interface(
+                f"Blocos desconhecidos carregados: {len(self.blocos_desconhecidos)} registro(s)."
+            )
+
+        def atualizar_lista_blocos_desconhecidos(self):
+            if self.lista_blocos_desconhecidos is None:
+                return
+            self.lista_blocos_desconhecidos.delete(0, tk.END)
+            self.indices_blocos_desconhecidos_visiveis = []
+            filtro = _texto_chave(self.filtro_blocos_desconhecidos_var.get())
+
+            pendentes = 0
+            for idx_real, item in enumerate(self.blocos_desconhecidos):
+                status = str(item.get("_STATUS_DECISAO", "PENDENTE_CLASSIFICACAO_MANUAL")).upper()
+                if status == "PENDENTE_CLASSIFICACAO_MANUAL":
+                    pendentes += 1
+                score = float(item.get("score", 0.0) or 0.0)
+                data = str(item.get("data_extraida", "")).strip() or "-"
+                chamado = str(item.get("chamado_extraido", "")).strip() or "-"
+                tecnico = str(item.get("tecnico_extraido", "")).strip() or "-"
+                motivo = str(item.get("motivo", "")).strip() or "-"
+                alvo = _texto_chave(f"{status} {data} {chamado} {tecnico} {motivo}")
+                if filtro and filtro not in alvo:
+                    continue
+                self.indices_blocos_desconhecidos_visiveis.append(idx_real)
+                linha = (
+                    f"[{status}] DATA: {data} | CHAMADO: {chamado} | "
+                    f"TÉCNICO: {tecnico} | SCORE: {score:.2f}"
+                )
+                self.lista_blocos_desconhecidos.insert(tk.END, linha)
+
+            total = len(self.blocos_desconhecidos)
+            visiveis = len(self.indices_blocos_desconhecidos_visiveis)
+            if filtro:
+                self.resumo_blocos_desconhecidos_var.set(
+                    (
+                        f"BLOCOS DESCONHECIDOS: {visiveis} (filtrado) | "
+                        f"TOTAL: {total} | PENDENTES: {pendentes}"
+                    )
+                )
+            else:
+                self.resumo_blocos_desconhecidos_var.set(
+                    f"BLOCOS DESCONHECIDOS: {total} | PENDENTES: {pendentes}"
+                )
+
+        def _indice_bloco_desconhecido_selecionado(self):
+            if self.lista_blocos_desconhecidos is None:
+                return None
+            selecionado = self.lista_blocos_desconhecidos.curselection()
+            if not selecionado:
+                return None
+            idx_visivel = int(selecionado[0])
+            if idx_visivel < 0 or idx_visivel >= len(self.indices_blocos_desconhecidos_visiveis):
+                return None
+            return self.indices_blocos_desconhecidos_visiveis[idx_visivel]
+
+        def _normalizar_campos_ajuste_interface(self, campos):
+            if not isinstance(campos, dict):
+                return {}
+            saida = {}
+            for campo, valor in campos.items():
+                chave = str(campo or "").strip().upper()
+                txt = " ".join(str(valor or "").split()).strip()
+                if chave in {"INICIO DA ATIVIDADE", "TÉRMINO DA ATIVIDADE"}:
+                    txt = _normalizar_hhmm_interface(txt)
+                elif chave in {"KM INICIAL", "KM FINAL"}:
+                    txt = re.sub(r"\D", "", txt)
+                saida[chave] = txt
+            return saida
+
+        def _registrar_decisao_bloco_desconhecido(
+            self,
+            decisao,
+            *,
+            campos_ajustados=None,
+            observacao="",
+        ):
+            idx = self._indice_bloco_desconhecido_selecionado()
+            if idx is None:
+                messagebox.showerror("Erro", "Selecione um bloco desconhecido.")
+                return
+            item = self.blocos_desconhecidos[idx]
+            decisao_txt = str(decisao or "").strip().upper()
+            if not decisao_txt:
+                return
+            campos_norm = self._normalizar_campos_ajuste_interface(campos_ajustados or {})
+            evento = {
+                "arquivo_origem": item.get("arquivo_origem", ""),
+                "hash_bloco": item.get("hash_bloco", ""),
+                "indice_bloco": int(item.get("indice_bloco", 0) or 0),
+                "decisao_usuario": decisao_txt,
+                "decidido_por": _usuario_local(),
+                "decidido_em": datetime.now().isoformat(),
+                "observacao": str(observacao or "").strip(),
+                "campos_ajustados": campos_norm,
+            }
+            os.makedirs(self.pasta_persistencia, exist_ok=True)
+            with open(self.arquivo_decisoes_usuario, "a", encoding="utf-8") as f:
+                f.write(json.dumps(evento, ensure_ascii=False) + "\n")
+            item["_STATUS_DECISAO"] = decisao_txt
+            item["_DECIDIDO_POR"] = evento["decidido_por"]
+            item["_DECIDIDO_EM"] = evento["decidido_em"]
+            self.atualizar_lista_blocos_desconhecidos()
+            self.registrar_log_interface(
+                f"Decisão registrada para bloco desconhecido: {decisao_txt}."
+            )
+
+        def confirmar_bloco_desconhecido(self):
+            self._registrar_decisao_bloco_desconhecido("CONFIRMADO_VALIDO")
+
+        def ignorar_bloco_desconhecido(self):
+            self._registrar_decisao_bloco_desconhecido("IGNORAR_BLOCO")
+
+        def reabrir_bloco_desconhecido(self):
+            self._registrar_decisao_bloco_desconhecido("PENDENTE_CLASSIFICACAO_MANUAL")
+
+        def ajustar_confirmar_bloco_desconhecido(self):
+            idx = self._indice_bloco_desconhecido_selecionado()
+            if idx is None:
+                messagebox.showerror("Erro", "Selecione um bloco desconhecido.")
+                return
+            item = self.blocos_desconhecidos[idx]
+
+            modal = tk.Toplevel(self.root)
+            modal.title("Ajustar e confirmar bloco desconhecido")
+            modal.geometry("860x560")
+            modal.transient(self.root)
+            modal.grab_set()
+
+            campos = [
+                ("DATA", "DATA:"),
+                ("CHAMADO", "CHAMADO:"),
+                ("TÉCNICO", "TÉCNICO:"),
+                ("CLIENTE", "CLIENTE:"),
+                ("KM INICIAL", "KM INICIAL:"),
+                ("KM FINAL", "KM FINAL:"),
+                ("INICIO DA ATIVIDADE", "INICIO DA ATIVIDADE:"),
+                ("TÉRMINO DA ATIVIDADE", "TÉRMINO DA ATIVIDADE:"),
+                ("ENDEREÇO CLIENTE", "ENDEREÇO CLIENTE:"),
+                ("ATIVIDADE REALIZADA", "ATIVIDADE REALIZADA:"),
+                ("QUEM ACOMPANHOU", "QUEM ACOMPANHOU:"),
+            ]
+
+            valores_iniciais = {
+                "DATA": str(item.get("data_extraida", "")).strip(),
+                "CHAMADO": str(item.get("chamado_extraido", "")).strip(),
+                "TÉCNICO": str(item.get("tecnico_extraido", "")).strip(),
+                "CLIENTE": str(item.get("cliente_extraido", "")).strip(),
+                "ATIVIDADE REALIZADA": str(item.get("atividade_realizada_extraida", "")).strip(),
+            }
+
+            frame_top = tk.Frame(modal, padx=12, pady=10)
+            frame_top.pack(fill="x")
+            tk.Label(
+                frame_top,
+                text=(
+                    f"BLOCO HASH: {item.get('hash_bloco', '')}\n"
+                    f"MOTIVO: {item.get('motivo', '')}\n"
+                    f"STATUS ATUAL: {item.get('_STATUS_DECISAO', '')}"
+                ),
+                justify="left",
+                anchor="w",
+            ).pack(fill="x")
+
+            frame_form = tk.Frame(modal, padx=12, pady=8)
+            frame_form.pack(fill="x")
+            vars_form = {}
+            for row, (chave, rotulo) in enumerate(campos):
+                tk.Label(frame_form, text=rotulo).grid(row=row, column=0, sticky="w", pady=3)
+                var = tk.StringVar(value=valores_iniciais.get(chave, ""))
+                vars_form[chave] = var
+                ttk.Entry(frame_form, textvariable=var, width=84).grid(
+                    row=row, column=1, sticky="we", pady=3, padx=(8, 0)
+                )
+            frame_form.columnconfigure(1, weight=1)
+
+            tk.Label(
+                modal,
+                text="PREVIEW DO BLOCO:",
+                font=("Segoe UI", 9, "bold"),
+            ).pack(anchor="w", padx=12, pady=(8, 2))
+            txt_preview = scrolledtext.ScrolledText(modal, height=9, wrap="word")
+            txt_preview.pack(fill="both", expand=True, padx=12, pady=(0, 10))
+            txt_preview.insert("1.0", str(item.get("bloco_preview", "")).replace(" | ", "\n"))
+            txt_preview.configure(state="disabled")
+
+            def salvar_ajuste():
+                campos_ajustados = {}
+                for chave, var in vars_form.items():
+                    valor = " ".join(str(var.get() or "").split()).strip()
+                    if valor:
+                        campos_ajustados[chave] = valor
+                if not campos_ajustados:
+                    messagebox.showerror(
+                        "Erro",
+                        "Informe ao menos um campo para ajuste antes de confirmar.",
+                        parent=modal,
+                    )
+                    return
+                self._registrar_decisao_bloco_desconhecido(
+                    "AJUSTADO_CONFIRMADO",
+                    campos_ajustados=campos_ajustados,
+                    observacao="AJUSTE MANUAL VIA CAMPO AVANCADO",
+                )
+                modal.destroy()
+
+            frame_btn = tk.Frame(modal, padx=12, pady=10)
+            frame_btn.pack(fill="x")
+            ttk.Button(frame_btn, text="SALVAR AJUSTE E CONFIRMAR", command=salvar_ajuste).pack(side="left")
+            ttk.Button(frame_btn, text="CANCELAR", command=modal.destroy).pack(side="left", padx=8)
+
+        def ver_bloco_desconhecido(self):
+            idx = self._indice_bloco_desconhecido_selecionado()
+            if idx is None:
+                messagebox.showerror("Erro", "Selecione um bloco desconhecido.")
+                return
+            item = self.blocos_desconhecidos[idx]
+
+            modal = tk.Toplevel(self.root)
+            modal.title("Detalhes do bloco desconhecido")
+            modal.geometry("920x520")
+            modal.transient(self.root)
+            modal.grab_set()
+
+            frame_info = tk.Frame(modal, padx=12, pady=10)
+            frame_info.pack(fill="x")
+
+            info_txt = (
+                f"STATUS: {item.get('_STATUS_DECISAO', '')}\n"
+                f"DATA: {item.get('data_extraida', '')}\n"
+                f"CHAMADO: {item.get('chamado_extraido', '')}\n"
+                f"TÉCNICO: {item.get('tecnico_extraido', '')}\n"
+                f"CLIENTE: {item.get('cliente_extraido', '')}\n"
+                f"SCORE: {item.get('score', '')} | LIMIAR: {item.get('limiar', '')}\n"
+                f"MOTIVO: {item.get('motivo', '')}\n"
+                f"PADRÃO SUGERIDO: {item.get('padrao_sugerido_nome', '')} ({item.get('padrao_sugerido_id', '')})\n"
+                f"HASH BLOCO: {item.get('hash_bloco', '')}\n"
+                f"ARQUIVO ORIGEM: {item.get('arquivo_origem', '')}\n"
+                f"ÍNDICE BLOCO: {item.get('indice_bloco', '')}\n"
+                f"DECIDIDO POR: {item.get('_DECIDIDO_POR', '')} | EM: {item.get('_DECIDIDO_EM', '')}"
+            )
+            tk.Label(frame_info, text=info_txt, justify="left", anchor="w").pack(fill="x")
+
+            tk.Label(
+                modal,
+                text="PREVIEW DO BLOCO:",
+                font=("Segoe UI", 9, "bold"),
+            ).pack(anchor="w", padx=12, pady=(8, 2))
+
+            txt_preview = scrolledtext.ScrolledText(modal, height=14, wrap="word")
+            txt_preview.pack(fill="both", expand=True, padx=12, pady=(0, 10))
+            txt_preview.insert(
+                "1.0",
+                str(item.get("bloco_preview", "")).replace(" | ", "\n"),
+            )
+            txt_preview.configure(state="disabled")
+
+            frame_btn = tk.Frame(modal, padx=12, pady=10)
+            frame_btn.pack(fill="x")
+            ttk.Button(frame_btn, text="FECHAR", command=modal.destroy).pack(side="left")
+
         def selecionar_pasta(self):
             # Adiciona todos os .txt da pasta selecionada (incluindo subpastas).
             pasta = filedialog.askdirectory()
@@ -1354,6 +1794,7 @@ if GUI_DISPONIVEL:
 
             if status == "SUCESSO":
                 self.atualizar_painel_resultado(resumo, duracao)
+                self.carregar_blocos_desconhecidos()
                 self.registrar_log_interface(
                     (
                         f"Processamento concluído em {duracao_txt}. "
